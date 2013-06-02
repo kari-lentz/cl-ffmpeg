@@ -63,9 +63,6 @@
 (defcfun ("avcodec_alloc_context3" avcodec-alloc-context3) :pointer
   (codec :pointer))
 
-(defcfun ("avcodec_close" avcodec-close) :int
-  (avctx :pointer))
-
 (defcfun ("avfreep" avfreep) :void
   (ptr :pointer))
 
@@ -73,6 +70,9 @@
   (avctx :pointer)
   (codec :pointer)
   (options :pointer))
+
+(defcfun ("avcodec_close" avcodec-close) :int
+  (avctx :pointer))
 
 (defcfun ("avformat_close_input" avformat-close-input) :void 
   (ss :pointer))
@@ -114,16 +114,18 @@
   (packet :pointer))
 
 (defcfun ("avcodec_decode_audio4" avcodec-decode-audio4) :int
+  (codec-context :pointer)
   (frame :pointer)
-  (got_frame_ptr :pointer)
+  (got-frame-ptr :pointer)
   (avpk :pointer))
 
 (defcfun ("avcodec_decode_video2" avcodec-decode-video2) :int
+  (codec-context :pointer)
   (picture :pointer)
-  (got_frame_ptr :pointer)
+  (got-frame-ptr :pointer)
   (avpk :pointer))
 
-(defparameter *decoders* ({} (:av-media-type-audio (foreign-symbol-pointer "avcodec_decode_audio4"))(:av-media-type-video (foreign-symbol-pointer "avcodec_decode_video2"))))
+(defparameter *decoders* ({} (:avmedia-type-audio (foreign-symbol-pointer "avcodec_decode_audio4"))(:avmedia-type-video (foreign-symbol-pointer "avcodec_decode_video2"))))
 
 (defmacro with-av-pointer(ptr allocator &body body)
   (with-gensyms (holder)
@@ -136,7 +138,6 @@
 	     (setf (mem-ref ,holder :pointer) ,ptr)
 	     (avfreep ,holder)))))))
 
-  
 (defmacro with-av-frame(av-frame &body body)
   (with-gensyms (holder)
     `(let ((,av-frame (av-frame-alloc)))
@@ -161,20 +162,35 @@
 	(unless (= (av-read-frame ,format-context packet) 0) 
 	  (return))
 	(if (= ,stream-idx (foreign-slot-value packet 'AVPacket 'stream-index))
-	    ,@body))))
+	    (progn
+	      ,@body)))))
 
-;; (defmacro with-decoded-frame(codec-context stream-type frame packet)
-;;   `(with-foreign-object (p-got-frame-ptr :pointer) 
-;;     (foreign-funcall-pointer ([] *decoders* stream-type) :pointer codec-context :pointer frame :pointer p-got-frame-ptr :pointer packet))
-;;   (unless (= (mem-ref p-got-frame :int) 0)
-;;     ,@body
+(defmacro with-decoded-frame((codec-context stream-type frame packet) &body body)
+  (with-gensyms (p-got-frame-ptr ret packet-size)
+    `(with-foreign-object (,p-got-frame-ptr :int) 
+       (let ((,packet-size (foreign-slot-value ,packet 'AVPacket 'size)))
+	 (let ((,ret (foreign-funcall-pointer ([] *decoders* ,stream-type) () :pointer ,codec-context :pointer ,frame :pointer ,p-got-frame-ptr :pointer ,packet :int)))
+	   (unless (= ,ret ,packet-size) (error 'ffmpeg-fault :msg (% "decode fault -> decoded bytes:~a expected bytes~a" ,ret ,packet-size)))
+	   (unless (= (mem-ref ,p-got-frame-ptr :int) 0)
+	     ,@body))))))
 
-(defmacro with-codec_context(context codec &body body)
-    `(with-av-pointer ,context (avcodec-alloc-context3 ,codec)
-       (unwind-protect
-	(progn
-	  ,@body)
-	 (avcodec-close ,context))))
+(defmacro with-decoded-frame!((codec-context stream-type frame packet) &body body)
+  (declare (ignore stream-type))
+  (with-gensyms (p-got-frame-ptr ret packet-size)
+    `(with-foreign-object (,p-got-frame-ptr :int) 
+       (let ((,packet-size (foreign-slot-value ,packet 'AVPacket 'size)))
+	 (format t "packet-size:~a~%" ,packet-size)
+	 (let ((,ret (avcodec-decode-audio4 ,codec-context ,frame ,p-got-frame-ptr ,packet)))
+	   (unless (= ,ret ,packet-size) (error 'ffmpeg-fault :msg (% "decode fault -> decoded bytes:~a expected bytes~a" ,ret ,packet-size)))
+	   (unless (= (mem-ref ,p-got-frame-ptr :int) 0)
+	     ,@body))))))
+
+;; (defmacro with-codec-context(context codec &body body)
+;;     `(with-av-pointer ,context (avcodec-alloc-context3 ,codec)
+;;        (unwind-protect
+;; 	(progn
+;; 	  ,@body)
+;; 	 (avcodec-close ,context))))
 
 (defmacro with-open-input((p-format-context file-path ) &body body)
   (with-gensyms (pp-format-context c-file-path ret)
@@ -190,13 +206,29 @@
 			    (progn
 			      ,@body)
 			 (avformat-close-input ,pp-format-context)))))))))))
-		 
+
+(defmacro with-open-codec((codec-context codec) &body body)
+  (with-gensyms (ret)
+    `(let ((,ret (avcodec-open2 ,codec-context ,codec (null-pointer))))
+       (unless (= ,ret 0) (error 'ffmpeg-fault :msg "codec open fault" :code ,ret))
+       (unwind-protect
+	    (progn
+	      ,@body)
+	 (avcodec-close ,codec-context)))))
+
+(defun open-codec-2(codec-context codec)
+  (let ((ret (avcodec-open2 codec-context codec (null-pointer))))
+       (unless (= ret 0) (error 'ffmpeg-fault :msg "codec open fault" :code ret))))
+       		 
 (defmacro with-input-stream((p-format-context p-codec-context stream-idx file-path media-type) &body body)
-  `(with-open-input (,p-format-context ,file-path)
-     (avformat-find-stream-info ,p-format-context (null-pointer))
-     (let ((,stream-idx (av-find-best-stream ,p-format-context (foreign-enum-value 'av-media-type ,media-type) -1 -1 (null-pointer) 0)))
-       (let ((,p-codec-context (get-codec-context ,p-format-context ,stream-idx)))
-	 ,@body))))))
+  (with-gensyms (pp-codec p-codec)
+    `(with-open-input (,p-format-context ,file-path)
+       (avformat-find-stream-info ,p-format-context (null-pointer))
+       (with-foreign-object (,pp-codec :pointer)
+	 (let ((,stream-idx (av-find-best-stream ,p-format-context (foreign-enum-value 'av-media-type ,media-type) -1 -1 ,pp-codec 0)))
+	   (let ((,p-codec-context (get-codec-context ,p-format-context ,stream-idx))(,p-codec (mem-ref ,pp-codec :pointer)))
+	     (open-codec-2 ,p-codec-context ,p-codec)
+	     ,@body))))))
 
 (defcstruct (AVFormat-Context-Overlay)
   (av-class  :pointer)
@@ -227,9 +259,11 @@
   (av-register-all)
   (let ((frames 0))
     (with-input-stream (p-format-context p-codec-context stream-idx "/mnt/MUSIC-THD/test.hd.mp4" stream-type)
-      (with-av-frame av-frame
+      (with-av-frame frame
 	(in-frame-read-loop p-format-context stream-idx packet
-	  (incf frames))
+	  (with-decoded-frame (p-codec-context stream-type frame packet)
+	    (incf frames)
+	    (format t "frame-count:~a~%" frames)))
 	(format t "frames-count:~a decode-context:~a~%" frames p-codec-context)))))
 
 (defun run())
