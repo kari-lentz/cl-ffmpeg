@@ -12,6 +12,21 @@
 
 (use-foreign-library libavcodec)
 
+(defmacro define-dummy-enums(&rest enums)
+  `(progn
+     ,@(loop for enum in enums collecting
+	    `(defcenum ,enum
+	       (,(to-keyword (.sym enum '-unknown)) -1)))))
+
+(defmacro defcstruct*(name-and-options &body fields)
+  (let ((type (get-first-atom name-and-options)))
+    `(progn
+       (defcstruct ,name-and-options ,@fields)
+       ,@(loop for item in fields collecting 
+	      (let ((slot-name (get-first-atom item)))
+		`(defmacro ,(.sym (get-first-atom name-and-options) '- (get-first-atom item)) (ptr) 
+		   `(foreign-slot-value ,ptr ,'',type ,'',slot-name)))))))
+
 (defcenum AVDuration-Estimation-Method
   :AVFMT-DURATION-FROM-PTS 
   :AVFMT-DURATION-FROM-STREAM
@@ -20,15 +35,15 @@
 (defcenum AVIO-Codec-ID
   :AVCODEC-ID-NONE)
 
-(defcstruct AVIO-Interrupt-CB
+(defcstruct* AVIO-Interrupt-CB
 	(callback :pointer)
 	(opaque :pointer))
 
-(defcstruct AVRational
+(defcstruct* AVRational
   (num :int)
   (den :int))
  
-(defcenum av-media-type
+(defcenum avmedia-type
   (:avmedia-type-unknown -1)
   :avmedia-type-video
   :avmedia-type-audio)
@@ -54,7 +69,7 @@
 
 (defcfun ("av_find_best_stream" av-find-best-stream) :int
   (ic :pointer)
-  (type av-media-type)
+  (type avmedia-type)
   (wanted_stream_nb :int)
   (related_stream :int)
   (decoder_ret :pointer)
@@ -84,12 +99,12 @@
 (defcenum AVPacket-Side-Data-Types
   (:unknown 0))
 
-(defcstruct AVPacket-Side-Data
+(defcstruct* AVPacket-Side-Data
   (data :pointer)
   (size :int)
   (type AVPacket-Side-Data-Types))
 
-(defcstruct AVPacket
+(defcstruct* AVPacket
   (buf :pointer)
   (pts :int64)
   (dts :int64)
@@ -142,6 +157,115 @@
 (defcfun ("avcodec_find_encoder_by_name" avcodec-find-encoder-by-name) :pointer
   (name  :string))	
 
+(define-dummy-enums AVCodec-ID AVPixel-Format AVColor-Primaries AVColor-Transfer-Characteristic AVColor-Space AVColor-Range AVChroma-Location AVField-Order AVSample-Format AVAudio-Service-Type) 
+     
+(defcstruct* (AVCodec-Context-Overlay)
+ (av-class :pointer)
+ (log-level-offset :int)
+ (codec-type avmedia-type)
+ (codec :pointer)
+ (codec-name :char :count 32)
+ (codec-id AVCodec-ID)
+ (codec-tag :unsigned-int)
+ (stream-codec-tag :unsigned-int)
+ (priv-data :pointer)
+ (internal :pointer)
+ (opaque :pointer)
+ (bit-rate :int)
+ (bit-rate-tolerance :int)
+ (global-quality :int)
+ (compression-level :int)
+ (flags :int)
+ (flags2 :int)
+ (extradata :pointer)
+ (extradata-size :int)
+ (timebase AVRational)
+ (ticks-per-frame :int)
+ (delay :int)
+ (width :int)
+ (height :int)
+ (coded-width :int) 
+ (coded-height :int)
+ (gop-size :int)
+ (pix-fmt AVPixel-Format)
+ (me-method :int)
+ (draw-horiz-band :pointer)
+ (get-format :pointer)
+ (max-b-frames :int) 
+ (b-quant-factor :float)
+ (rc-strategy :int)
+ (b-frame-strategy :int)
+ (b-quant-offset :float)
+ (has-b-frames :int)
+ (mpeg-quant :int)
+ (i-quant-factor :float)
+ (i-quant-offset :float)
+ (lumi-masking :float) 
+ (temporal-cplx-masking :float)
+ (spatial-cplx-masking :float)
+ (p-masking :float)
+ (dark-masking :float)
+ (slice-count :int)
+ (prediction-method :int)
+ (slice-offset :pointer)
+ (sample-aspect-ratio AVRational)
+ (me-cmp :int)
+ (me-sub-cmp :int)
+ (mb-cmp :int)
+ (ildct-cmp :int)
+ (dia-size :int)
+ (last-predictor-count :int)
+ (pre-me :int)
+ (me-pre-cmp :int)
+ (pre-dia-size :int)
+ (me-subpel-quality :int)
+ (dtg-active-format :int)
+ (me-range :int)
+ (intra-quant-bias :int)
+ (inter-quant-bias :int)
+ (slice-flags :int) 
+ (xvmc-acceleration :int)
+ (mb-decision :int)
+ (intra-matrix :pointer)
+ (inter-matrix :pointer)
+ (scenechange-threshold :int)
+ (noise-reduction :int)
+ (me-threshold :int)
+ (mb-threshold :int) 
+ (intra-dc-precision :int)
+ (skip-top :int)
+ (skip-bottom :int)
+ (border-masking :float)
+ (mb-lmin :int)
+ (mb-lmax :int)
+ (me-penalty-compensation :int)
+ (bidir-refine :int)
+ (brd-scale :int)
+ (keyint-min :int)
+ (refs :int)
+ (chromaoffset :int)
+ (scenechange-factor :int)
+ (mv0-threshold :int)
+ (b-sensitivity :int)
+ (color-primaries AVColor-Primaries) 	
+ (color-trc AVColor-Transfer-Characteristic) 	
+ (colorspace AVColor-Space) 
+ (color-range AVColor-Range) 
+ (chroma-sample-location AVChroma-Location)
+ (slices :int)
+ (field-order AVField-Order)
+ (sample-rate :int)
+ (channels :int)
+ (sample-fmt AVSample-Format) 
+ (frame-size :int) 
+ (frame-number :int)
+ (block-align :int)
+ (cutoff :int)
+ (channel-layout :uint64)
+ (request-channel-layout :uint64)
+ (audio-service-type AVAudio-Service-Type) 	
+ (request-sample-fmt AVSample-Format))
+
 (defparameter *decoders* ({} (:avmedia-type-audio (foreign-symbol-pointer "avcodec_decode_audio4"))(:avmedia-type-video (foreign-symbol-pointer "avcodec_decode_video2"))))
 
 (defmacro with-av-pointer(ptr allocator &body body)
@@ -166,7 +290,7 @@
 	   (av-frame-free ,holder))))))
 
 (defmacro with-av-packet(av-packet &body body)
-  `(with-foreign-object (,av-packet 'AVPacket)
+  `(with-foreign-object(,av-packet 'AVPacket)
      (av-init-packet ,av-packet)
      (unwind-protect
 	  (progn
@@ -178,15 +302,15 @@
       (with-av-packet ,packet
 	(unless (= (av-read-frame ,format-context ,packet) 0) 
 	  (return))
-	(format t "stream-idx:~a:~a~%" ,stream-idx (foreign-slot-value ,packet 'AVPacket 'stream-index))
-	(if (= ,stream-idx (foreign-slot-value ,packet 'AVPacket 'stream-index))
+	(format t "stream-idx:~a:~a~%" ,stream-idx (AVPacket-stream-index ,packet))
+	(if (= ,stream-idx (AVPacket-stream-index ,packet))
 	    (progn
 	      ,@body)))))
 
 (defmacro with-decoded-frame((codec-context stream-type frame packet) &body body)
   (with-gensyms (p-got-frame-ptr ret packet-size)
     `(with-foreign-object (,p-got-frame-ptr :int) 
-       (let ((,packet-size (foreign-slot-value ,packet 'AVPacket 'size)))
+       (let ((,packet-size (AVPacket-size ,packet)))
 	 (let ((,ret (foreign-funcall-pointer ([] *decoders* ,stream-type) () :pointer ,codec-context :pointer ,frame :pointer ,p-got-frame-ptr :pointer ,packet :int)))
 	   (unless (= ,ret ,packet-size) (error 'ffmpeg-fault :msg (% "decode fault -> decoded bytes:~a expected bytes~a" ,ret ,packet-size)))
 	   (unless (= (mem-ref ,p-got-frame-ptr :int) 0)
@@ -196,7 +320,7 @@
   (declare (ignore stream-type))
   (with-gensyms (p-got-frame-ptr ret packet-size)
     `(with-foreign-object (,p-got-frame-ptr :int) 
-       (let ((,packet-size (foreign-slot-value ,packet 'AVPacket 'size)))
+       (let ((,packet-size (AVPacket-size ,packet)))
 	 (format t "packet-size:~a~%" ,packet-size)
 	 (let ((,ret (avcodec-decode-audio4 ,codec-context ,frame ,p-got-frame-ptr ,packet)))
 	   (unless (= ,ret ,packet-size) (error 'ffmpeg-fault :msg (% "decode fault -> decoded bytes:~a expected bytes~a" ,ret ,packet-size)))
@@ -243,12 +367,12 @@
     `(with-open-input (,p-format-context ,file-path)
        (avformat-find-stream-info ,p-format-context (null-pointer))
        (with-foreign-object (,pp-codec :pointer)
-	 (let ((,stream-idx (av-find-best-stream ,p-format-context (foreign-enum-value 'av-media-type ,media-type) -1 -1 ,pp-codec 0)))
+	 (let ((,stream-idx (av-find-best-stream ,p-format-context (foreign-enum-value 'avmedia-type ,media-type) -1 -1 ,pp-codec 0)))
 	   (let ((,p-codec-context (get-codec-context ,p-format-context ,stream-idx))(,p-codec (mem-ref ,pp-codec :pointer)))
 	     (open-codec-2 ,p-codec-context ,p-codec)
 	     ,@body))))))
 
-(defcstruct (AVFormat-Context-Overlay)
+(defcstruct* (AVFormat-Context-Overlay)
   (av-class  :pointer)
   (iformat  :pointer)
   (oformat  :pointer)
@@ -258,20 +382,20 @@
   (nb-streams  :unsigned-int)
   (streams  :pointer))
 
-(defcstruct (AVStream-Overlay)
+(defcstruct* (AVStream-Overlay)
   (index :int)
   (id :int)
   (codec :pointer))
 
 (defun get-codec-context(format-context stream-idx)
-  (let ((nb-streams (foreign-slot-value format-context 'AVFormat-Context-Overlay 'nb-streams)))
+  (let ((nb-streams (AVFormat-Context-Overlay-nb-streams format-context)))
     (cond ((>= stream-idx nb-streams)
 	   (error 'ffmpeg-fault :msg (% "stream index:~a too high" stream-idx)))
 	  ((< stream-idx 0)
 	   (error 'ffmpeg-fault :msg (% "stream index below zero"))))
-    (let ((streams (foreign-slot-value format-context 'AVFormat-Context-Overlay 'streams)))
+    (let ((streams (AVFormat-Context-Overlay-streams format-context)))
       (let ((stream (mem-aref streams :pointer stream-idx)))
-	(foreign-slot-value stream 'AVStream-Overlay 'codec)))))
+	(AVStream-Overlay-codec stream)))))
 
 (defmacro with-encoder((codec-context name) &body body)
   (with-gensyms (codec)
@@ -283,7 +407,9 @@
 		,@body)
 	   (avcodec-close ,codec-context))))))
 
-;(defun set-audio-params(codec-context channels sample-rate))
+(defun set-audio-params(codec-context &optional (channels 2) (sample-rate 44100))
+  (setf (AVCodec-Context-Overlay-channels  codec-context) channels)
+  (setf (AVCodec-Context-Overlay-sample-rate codec-context) sample-rate))
 
 (defun test-ffmpeg!(&optional (stream-type :avmedia-type-audio))
   (av-register-all)
@@ -308,3 +434,29 @@
 
 
 (defun run())
+
+(defmacro defcstruct*!(name-and-options &body fields)
+  (let ((type (get-first-atom name-and-options)))
+    `(progn
+       ,(loop for item in fields collecting 
+	     (let ((slot-name (get-first-atom item)))
+	       `(defun ,(.sym (get-first-atom name-and-options) '- (get-first-atom item)) (ptr) 
+		  (foreign-slot-value ptr (quote ,type) (quote ,slot-name))))))))   
+
+(defun test-cstruct*()
+  (macroexpand-1
+   `(defcstruct* AVPacket
+     (buf :pointer)
+     (pts :int64)
+     (dts :int64)
+     (data :pointer)
+     (size :int)
+     (stream-index :int)
+     (flags :int)
+     (side-data AvPacket-Side-Data)
+     (side-data-elems :int)
+     (duration :int)
+     (pos :int64)
+     (convergence-duration :int64))))
+
+
