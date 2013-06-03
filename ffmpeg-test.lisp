@@ -63,7 +63,7 @@
 (defcfun ("avcodec_alloc_context3" avcodec-alloc-context3) :pointer
   (codec :pointer))
 
-(defcfun ("avfreep" avfreep) :void
+(defcfun ("av_freep" avfreep) :void
   (ptr :pointer))
 
 (defcfun ("avcodec_open2" avcodec-open2) :int
@@ -125,6 +125,23 @@
   (got-frame-ptr :pointer)
   (avpk :pointer))
 
+(defcenum AVSample-Format 
+   (:AV-SAMPLE-FMT-NONE -1)
+   :AV-SAMPLE-FMT-U8
+   :AV-SAMPLE-FMT-S16
+   :AV-SAMPLE-FMT-S32
+   :AV-SAMPLE-FMT-FLT
+   :AV-SAMPLE-FMT-DBL 
+   :AV-SAMPLE-FMT-U8P
+   :AV-SAMPLE-FMT-S16P
+   :AV-SAMPLE-FMT-S32P
+   :AV-SAMPLE-FMT-FLTP
+   :AV-SAMPLE-FMT-DBLP 
+   :AV-SAMPLE-FMT-NB)
+
+(defcfun ("avcodec_find_encoder_by_name" avcodec-find-encoder-by-name) :pointer
+  (name  :string))	
+
 (defparameter *decoders* ({} (:avmedia-type-audio (foreign-symbol-pointer "avcodec_decode_audio4"))(:avmedia-type-video (foreign-symbol-pointer "avcodec_decode_video2"))))
 
 (defmacro with-av-pointer(ptr allocator &body body)
@@ -159,9 +176,9 @@
 (defmacro in-frame-read-loop(format-context stream-idx packet &body body)
   `(loop
       (with-av-packet ,packet
-	(unless (= (av-read-frame ,format-context packet) 0) 
+	(unless (= (av-read-frame ,format-context ,packet) 0) 
 	  (return))
-	(if (= ,stream-idx (foreign-slot-value packet 'AVPacket 'stream-index))
+	(if (= ,stream-idx (foreign-slot-value ,packet 'AVPacket 'stream-index))
 	    (progn
 	      ,@body)))))
 
@@ -255,7 +272,19 @@
       (let ((stream (mem-aref streams :pointer stream-idx)))
 	(foreign-slot-value stream 'AVStream-Overlay 'codec)))))
 
-(defun test-ffmpeg(&optional (stream-type :avmedia-type-audio))
+(defmacro with-encoder((codec-context name) &body body)
+  (with-gensyms (codec)
+    `(let ((,codec (avcodec-find-encoder-by-name ,name)))
+       (when (null-pointer-p ,codec) (error 'ffmpeg-fault :msg (% "codec ~a not found" ,codec)))
+       (with-av-pointer ,codec-context (avcodec-alloc-context3 ,codec)
+	 (unwind-protect
+	      (progn
+		,@body)
+	   (avcodec-close ,codec-context))))))
+
+;(defun set-audio-params(codec-context channels sample-rate))
+
+(defun test-ffmpeg!(&optional (stream-type :avmedia-type-audio))
   (av-register-all)
   (let ((frames 0))
     (with-input-stream (p-format-context p-codec-context stream-idx "/mnt/MUSIC-THD/test.hd.mp4" stream-type)
@@ -265,5 +294,17 @@
 	    (incf frames)
 	    (format t "frame-count:~a~%" frames)))
 	(format t "frames-count:~a decode-context:~a~%" frames p-codec-context)))))
+
+(defun test-ffmpeg(&optional (stream-type :avmedia-type-audio))
+  (av-register-all)
+  (let ((frames 0))
+    (with-input-stream (p-format-context-in p-codec-context-in stream-idx "/mnt/MUSIC-THD/test.hd.mp4" stream-type)
+      (with-av-frame frame
+	(in-frame-read-loop p-format-context-in stream-idx packet-in
+	  (with-decoded-frame (p-codec-context-in stream-type frame packet-in)
+	    (incf frames)
+	    (format t "frame-count:~a~%" frames)))
+	(format t "frames-count:~a decode-context:~a~%" frames p-codec-context-in)))))
+
 
 (defun run())
