@@ -12,6 +12,12 @@
 
 (use-foreign-library libavcodec)
 
+(define-foreign-library ffmpeg-wrapper
+  (:unix (:or "/usr/local/lib/ffmpeg-wrapper.so"))
+  (t (:default "ffmpeg-wrapper")))
+
+(use-foreign-library ffmpeg-wrapper)
+
 (defmacro define-dummy-enums(&rest enums)
   `(progn
      ,@(loop for enum in enums collecting
@@ -261,16 +267,45 @@
  (frame-number :int)
  (block-align :int)
  (cutoff :int)
+ (request-channels :int)
  (channel-layout :uint64)
  (request-channel-layout :uint64)
  (audio-service-type AVAudio-Service-Type) 	
  (request-sample-fmt AVSample-Format))
 
+    
 (defcfun ("av_get_channel_layout" av-get-channel-layout) :uint64	
   (name :string))
 
 (defcfun ("av_get_channel_layout_nb_channels" av-get-channel-layout-nb-channels) :int
     (channel_layout :uint64))	
+
+(defcfun ("my_test" my-test) :int
+    (msg :string))
+
+(defmacro define-ffmpeg-wrappers(prefix &body name-types)
+  `(progn
+     ,@(with-collector 
+	(!push)
+	(loop for (name type) in name-types do
+	     (unless type (error 'ffmpeg-fault :msg (% "No type for ~a-~a" prefix name)))  
+	     (let ((accessor-name (.sym prefix '- name))(lisp-get-name (.sym prefix '-get- name))(lisp-set-name (.sym prefix '-set- name)))
+	       (flet ((lisp-to-c(lisp-name)
+			(string-downcase (cl-ppcre:regex-replace-all "\\-" (symbol-name lisp-name) "_"))))
+		 (let ((c-get-name (lisp-to-c lisp-get-name))(c-set-name (lisp-to-c lisp-set-name)))
+		   (!push `(defcfun (,c-get-name ,accessor-name) ,type
+			     (,prefix :pointer)))
+		   (!push `(defcfun (,c-set-name ,lisp-set-name) :void
+			     (,prefix :pointer)
+			     (,name ,type)))
+		   (!push `(defsetf ,accessor-name ,lisp-set-name)))))))))
+
+(define-ffmpeg-wrappers codec-context
+  (channel-layout :uint64)
+  (channels :int)
+  (sample-fmt AVSample-Format)
+  (sample-rate :int)
+  (bit-rate :int))
 
 (defparameter *decoders* ({} (:avmedia-type-audio (foreign-symbol-pointer "avcodec_decode_audio4"))(:avmedia-type-video (foreign-symbol-pointer "avcodec_decode_video2"))))
 
@@ -413,7 +448,7 @@
 	      ,@body)
 	 (avcodec-close ,codec-context)))))
 
-(defmacro with-audio-encoder((codec-context name &key (sample-rate 44100) (channel-layout "stereo") bit-rate) &body body)
+(defmacro with-audio-encoder!((codec-context name &key (sample-rate 44100) (channel-layout "stereo") bit-rate) &body body)
   (with-gensyms (codec channel-layout-id)
     `(with-encoder (,codec-context ,codec ,name)
        (format t "BEFORE-> channels:~a sample-rate:~a bit-rate:~a: channel-layout:~a codec:~a:~a~%" (AVCodec-Context-Overlay-channels ,codec-context) (AVCodec-Context-Overlay-sample-rate ,codec-context) (AVCodec-Context-Overlay-bit-rate ,codec-context) (AVCodec-Context-overlay-channel-layout ,codec-context) (AVCodec-Context-Overlay-codec ,codec-context) ,codec-context)
@@ -423,9 +458,25 @@
 	 (setf (AVCodec-Context-Overlay-channels ,codec-context) (av-get-channel-layout-nb-channels ,channel-layout-id))
 	 (setf (AVCodec-Context-Overlay-sample-rate ,codec-context) ,sample-rate)
 	 (setf (Avcodec-Context-Overlay-sample-fmt ,codec-context) (foreign-enum-value 'AVSample-Format :AV-SAMPLE-FMT-S16))
-	 ;(setf (Avcodec-Context-Overlay-sample-fmt ,codec-context) :AV-SAMPLE-FMT-S16)
+	 (setf (Avcodec-Context-Overlay-sample-fmt ,codec-context) :AV-SAMPLE-FMT-S16)
 	 (when ,bit-rate (setf (avCodec-Context-Overlay-bit-rate ,codec-context) ,bit-rate))
 	 (format t "AFTER-> channels:~a sample-rate:~a bit-rate:~a channel-layout:~a~%" (AVCodec-Context-Overlay-channels ,codec-context) (AVCodec-Context-Overlay-sample-rate ,codec-context) (AVCodec-Context-Overlay-bit-rate ,codec-context) (AVCodec-Context-overlay-channel-layout ,codec-context)))
+       (with-open-codec (,codec-context ,codec) 
+	 ,@body))))
+
+(defmacro with-audio-encoder((codec-context name &key (sample-rate 44100) (channel-layout "stereo") bit-rate) &body body)
+  (with-gensyms (codec channel-layout-id)
+    `(with-encoder (,codec-context ,codec ,name)
+       (format t "BEFORE-> channels:~a sample-rate:~a bit-rate:~a: channel-layout:~a~%" (codec-context-channels ,codec-context) (codec-context-sample-rate ,codec-context) (codec-context-bit-rate ,codec-context) (codec-context-channel-layout ,codec-context))
+       (let ((,channel-layout-id (av-get-channel-layout ,channel-layout)))
+	 (when (= ,channel-layout-id 0) (error 'ffmpeg-fault :msg (% "no channel layout:~a" ,channel-layout)))
+	 (setf (codec-context-channel-layout ,codec-context) ,channel-layout-id)
+	 (setf (codec-context-channels ,codec-context) (av-get-channel-layout-nb-channels ,channel-layout-id))
+	 (setf (codec-context-sample-rate ,codec-context) ,sample-rate)
+	 (setf (codec-context-sample-fmt ,codec-context) (foreign-enum-value 'AVSample-Format :AV-SAMPLE-FMT-S16))
+	 ;(codec-context-set-sample-fmt ,codec-context :AV-SAMPLE-FMT-S16)
+	 (when ,bit-rate (setf (codec-context-bit-rate ,codec-context) ,bit-rate))
+	 (format t "AFTER-> channels:~a sample-rate:~a bit-rate:~a: channel-layout:~a~%" (codec-context-channels ,codec-context) (codec-context-sample-rate ,codec-context) (codec-context-bit-rate ,codec-context) (codec-context-channel-layout ,codec-context)))
        (with-open-codec (,codec-context ,codec) 
 	 ,@body))))
 
@@ -454,7 +505,7 @@
   (av-register-all)
   (let ((frames 0))
     (with-input-stream (p-format-context-in p-codec-context-in stream-idx "/mnt/MUSIC-THD/test.hd.mp4" stream-type)
-      (with-audio-encoder (p-codec-context-out "libmp3lame" :channel-layout "mono" :bit-rate 320000) 
+      (with-audio-encoder (p-codec-context-out "libmp3lame" :channel-layout "mono" :bit-rate 64000) 
 	(with-av-frame frame
 	  (in-frame-read-loop p-format-context-in stream-idx packet-in
 	    (with-decoded-frame (p-codec-context-in stream-type frame packet-in)
