@@ -171,10 +171,13 @@
    :AV-SAMPLE-FMT-DBLP 
    :AV-SAMPLE-FMT-NB)
 
+(define-dummy-enums AVCodec-ID AVPixel-Format AVColor-Primaries AVColor-Transfer-Characteristic AVColor-Space AVColor-Range AVChroma-Location AVField-Order AVAudio-Service-Type) 
+
+(defcfun ("avcodec_find_encoder" avcodec-find-encoder) :pointer
+  (id avcodec-id))
+
 (defcfun ("avcodec_find_encoder_by_name" avcodec-find-encoder-by-name) :pointer
   (name  :string))	
-
-(define-dummy-enums AVCodec-ID AVPixel-Format AVColor-Primaries AVColor-Transfer-Characteristic AVColor-Space AVColor-Range AVChroma-Location AVField-Order AVAudio-Service-Type) 
          
 (defcfun ("av_get_channel_layout" av-get-channel-layout) :uint64	
   (name :string))
@@ -187,6 +190,42 @@
 
 (defcfun ("my_test" my-test) :int
     (msg :string))
+
+(defcfun ("avformat_alloc_output_context2" avformat-alloc-output-context2) :int
+  (ctx :pointer)
+  (oformat :pointer)
+  (format_name :string)
+  (filename :string))
+
+(defcfun ("avformat_free_context" avformat-free-context) :void
+  (format-context :pointer))
+
+(defcfun ("avformat_new_stream" avformat-new-stream) :pointer
+  (format-context :pointer)
+  (codec :pointer))
+
+(defcfun ("avformat_write_header" avformat-write-header) :int
+  (format-context :pointer)
+  (options :pointer))
+
+(defcfun ("av_write_frame" av-write-frame) :int
+  (format-context :pointer)
+  (pkt :pointer))
+
+(defcfun ("av_interleaved_write_frame" av-interleaved-write-frame) :int
+  (format-context :pointer)
+  (pkt :pointer))
+
+(defcfun ("av_write_trailer" av-write-trailer) :int
+    (format-context :pointer))
+
+(defcfun ("avio_open" avio-open) :int
+  (io-context :pointer)
+  (url :string)
+  (flags :int))
+
+(defcfun ("avio_close" avio-close) :int
+  (io-context :pointer))
 
 (defmacro define-ffmpeg-wrappers(prefix &body name-types)
   `(progn
@@ -212,9 +251,30 @@
   (sample-rate :int)
   (bit-rate :int))
 
-(defparameter *decoders* ({} (:avmedia-type-audio (foreign-symbol-pointer "avcodec_decode_audio4"))(:avmedia-type-video (foreign-symbol-pointer "avcodec_decode_video2"))))
+(define-ffmpeg-wrappers format-context
+  (oformat :pointer)
+  (pb :pointer))
 
-(defparameter *encoders* ({} (:avmedia-type-audio (foreign-symbol-pointer "avcodec_encode_audio2"))(:avmedia-type-video (foreign-symbol-pointer "avcodec_encode_video2"))))
+(define-ffmpeg-wrappers output-format
+  (audio-codec avcodec-id)
+  (video-codec avcodec-id))
+
+(define-ffmpeg-wrappers stream
+    (codec :pointer))
+
+(with-full-eval
+  (defun lisp-to-c(function-name)
+    (string-downcase (cl-ppcre:regex-replace-all "\\-" (symbol-name function-name) "_"))))
+
+(defmacro define-foreign-call-pointers(identifier &body pointers)
+  `(defparameter ,identifier 
+     ({}
+      ,@(loop for (key pointer) in pointers collecting
+	    `(,key (foreign-symbol-pointer ,(lisp-to-c pointer)))))))
+
+(define-foreign-call-pointers *decoders* (:avmedia-type-audio avcodec-decode-audio4)(:avmedia-type-video avcodec-decode-video2))
+(define-foreign-call-pointers *encoders* (:avmedia-type-audio avcodec-encode-audio2)(:avmedia-type-video avcodec-decode-video2))
+(define-foreign-call-pointers *codecs* (:avmedia-type-audio output-format-get-audio-codec)(:avmedia-type-video output-format-get-video-codec))
 
 (defmacro with-av-pointer(ptr allocator &body body)
   (with-gensyms (holder)
@@ -265,7 +325,6 @@
 	  (return))
 	(if (= ,stream-idx (AVPacket-stream-index ,packet))
 	    (progn
-	      (format t "stream-idx:~a:~a~%" ,stream-idx (AVPacket-stream-index ,packet))
 	      ,@body)))))
 
 (defmacro with-decoded-frame((codec-context stream-type frame packet) &body body)
@@ -278,19 +337,18 @@
 	     ,@body))))))
 
 (defmacro with-open-input((p-format-context file-path ) &body body)
-  (with-gensyms (pp-format-context c-file-path ret)
-    `(with-foreign-string (,c-file-path ,file-path)
-       (with-foreign-objects ((,pp-format-context :pointer))
-	 (setf (mem-ref ,pp-format-context :pointer) (null-pointer))
-	 (let ((,ret (avformat-open-input ,pp-format-context ,c-file-path (null-pointer) (null-pointer))))
-	   (unless (= ,ret 0) (error 'ffmpeg-fault :msg (% "unable to open:~a" ,file-path) :code ,ret))
-	   (let ((,p-format-context (mem-ref ,pp-format-context :pointer)))
-	     (if (not (null-pointer-p ,p-format-context))
-		 (progn
-		   (unwind-protect
-			(progn
-			  ,@body)
-		     (avformat-close-input ,pp-format-context))))))))))
+  (with-gensyms (pp-format-context ret)
+    `(with-foreign-objects ((,pp-format-context :pointer))
+       (setf (mem-ref ,pp-format-context :pointer) (null-pointer))
+       (let ((,ret (avformat-open-input ,pp-format-context ,file-path (null-pointer) (null-pointer))))
+	 (unless (= ,ret 0) (error 'ffmpeg-fault :msg (% "unable to open:~a" ,file-path) :code ,ret))
+	 (let ((,p-format-context (mem-ref ,pp-format-context :pointer)))
+	   (if (not (null-pointer-p ,p-format-context))
+	       (progn
+		 (unwind-protect
+		      (progn
+			,@body)
+		   (avformat-close-input ,pp-format-context)))))))))
 
 (defmacro with-open-codec((codec-context codec &optional name) &body body)
   (with-gensyms (ret)
@@ -340,7 +398,36 @@
       (let ((stream (mem-aref streams :pointer stream-idx)))
 	(AVStream-Overlay-codec stream)))))
 
-(defmacro with-encoder((codec-context codec name) &body body)
+(defun set-audio-params(codec-context num-channels sample-rate bit-rate)
+  (setf (codec-context-channel-layout codec-context) (av-get-default-channel-layout num-channels))
+  (setf (codec-context-channels codec-context) num-channels)
+  (setf (codec-context-sample-rate codec-context) sample-rate)
+  (setf (codec-context-sample-fmt codec-context) (foreign-enum-value 'AVSample-Format :AV-SAMPLE-FMT-S16P))
+  (when bit-rate (setf (codec-context-bit-rate codec-context) bit-rate)))
+
+(defun get-codec(format-context stream-type)
+  (let ((oformat (format-context-oformat format-context)))
+    (when (null-pointer-p oformat) (error 'ffmpeg-fault :msg "null output format in format context"))
+    (let ((codec-id (foreign-funcall-pointer ([] *codecs* stream-type) () :pointer oformat :int)))
+      (let ((ret (avcodec-find-encoder codec-id))) 
+	(when (null-pointer-p ret) (error 'ffmpeg-fault :msg "no encoder for format context"))  
+	ret))))
+
+(defmacro with-encoder((codec-context codec format-context stream-type) &body body)
+  (with-gensyms (stream)
+    `(let ((,codec (get-codec ,format-context ,stream-type)))
+       (let ((,stream (avformat-new-stream ,format-context ,codec))) 
+	 (let ((,codec-context (stream-codec ,stream)))
+	   ,@body)))))
+
+(defmacro with-audio-encoder((codec-context format-context stream-type &key (sample-rate 44100) (num-channels 2) bit-rate) &body body)
+  (with-gensyms (codec)
+    `(with-encoder (,codec-context ,codec ,format-context ,stream-type)  
+       (set-audio-params ,codec-context ,num-channels ,sample-rate ,bit-rate)
+       (with-open-codec (,codec-context ,codec) 
+	 ,@body))))
+
+(defmacro with-new-encoder((codec-context codec name) &body body)
   `(let ((,codec (avcodec-find-encoder-by-name ,name)))
      (when (null-pointer-p ,codec) (error 'ffmpeg-fault :msg (% "codec ~a not found" ,name)))
      (with-av-pointer ,codec-context (avcodec-alloc-context3 ,codec)
@@ -350,32 +437,11 @@
 	      ,@body)
 	 (avcodec-close ,codec-context)))))
 
-(defmacro with-audio-encoder!((codec-context name &key (sample-rate 44100) (channel-layout "stereo") bit-rate) &body body)
-  (with-gensyms (codec channel-layout-id)
-    `(with-encoder (,codec-context ,codec ,name)
-       (format t "BEFORE-> channels:~a sample-rate:~a bit-rate:~a: channel-layout:~a~%" (codec-context-channels ,codec-context) (codec-context-sample-rate ,codec-context) (codec-context-bit-rate ,codec-context) (codec-context-channel-layout ,codec-context))
-       (let ((,channel-layout-id (av-get-channel-layout ,channel-layout)))
-	 (when (= ,channel-layout-id 0) (error 'ffmpeg-fault :msg (% "no channel layout:~a" ,channel-layout)))
-	 (setf (codec-context-channel-layout ,codec-context) ,channel-layout-id)
-	 (setf (codec-context-channels ,codec-context) (av-get-channel-layout-nb-channels ,channel-layout-id))
-	 (setf (codec-context-sample-rate ,codec-context) ,sample-rate)
-	 (setf (codec-context-sample-fmt ,codec-context) (foreign-enum-value 'AVSample-Format :AV-SAMPLE-FMT-S16))
-	 ;(codec-context-set-sample-fmt ,codec-context :AV-SAMPLE-FMT-S16)
-	 (when ,bit-rate (setf (codec-context-bit-rate ,codec-context) ,bit-rate))
-	 (format t "AFTER-> channels:~a sample-rate:~a bit-rate:~a: channel-layout:~a~%" (codec-context-channels ,codec-context) (codec-context-sample-rate ,codec-context) (codec-context-bit-rate ,codec-context) (codec-context-channel-layout ,codec-context)))
-       (with-open-codec (,codec-context ,codec ,name) 
-	 ,@body))))
-
-(defmacro with-audio-encoder((codec-context name &key (sample-rate 44100) (num-channels 2) bit-rate) &body body)
+(defmacro with-new-audio-encoder((codec-context name &key (sample-rate 44100) (num-channels 2) bit-rate) &body body)
   (with-gensyms (codec)
-    `(with-encoder (,codec-context ,codec ,name)
-       (format t "BEFORE-> channels:~a sample-rate:~a bit-rate:~a: channel-layout:~a~%" (codec-context-channels ,codec-context) (codec-context-sample-rate ,codec-context) (codec-context-bit-rate ,codec-context) (codec-context-channel-layout ,codec-context))
-       (setf (codec-context-channel-layout ,codec-context) (av-get-default-channel-layout ,num-channels))
-       (setf (codec-context-channels ,codec-context) ,num-channels)
-       (setf (codec-context-sample-rate ,codec-context) ,sample-rate)
-       (setf (codec-context-sample-fmt ,codec-context) (foreign-enum-value 'AVSample-Format :AV-SAMPLE-FMT-S16P))
+    `(with-new-encoder (,codec-context ,codec ,name)
+       (set-audio-params ,codec-context ,num-channels ,sample-rate ,bit-rate)
        (when ,bit-rate (setf (codec-context-bit-rate ,codec-context) ,bit-rate))
-       (format t "AFTER-> channels:~a sample-rate:~a bit-rate:~a: channel-layout:~a~%" (codec-context-channels ,codec-context) (codec-context-sample-rate ,codec-context) (codec-context-bit-rate ,codec-context) (codec-context-channel-layout ,codec-context))
        (with-open-codec (,codec-context ,codec ,name) 
 	 ,@body))))
 
@@ -387,19 +453,62 @@
 	   (unless (= ,ret 0) (error 'ffmpeg-fault :msg (% "encode fault" :code ,ret)))
 	   (unless (= (mem-ref ,p-got-packet-ptr :int) 0)
 	     ,@body))))))
+				
+(defmacro with-open-output((p-format-context file-path) &body body)
+  (with-gensyms (pp-format-context ret)
+    `(with-foreign-objects ((,pp-format-context :pointer))
+       (setf (mem-ref ,pp-format-context :pointer) (null-pointer))
+       (let ((,ret (avformat-alloc-output-context2 ,pp-format-context (null-pointer) (null-pointer) ,file-path)))
+	 (unless (= ,ret 0) (error 'ffmpeg-fault :msg (% "unable to open:~a" ,file-path) :code ,ret))
+	 (let ((,p-format-context (mem-ref ,pp-format-context :pointer)))
+	   (if (not (null-pointer-p ,p-format-context))
+	       (unwind-protect
+		    (progn
+		      ,@body)
+		 (avformat-free-context ,p-format-context))))))))
 
-(defun test-ffmpeg(&optional (stream-type :avmedia-type-audio))
+(defmacro with-open-output-file((file-path format-context) &body body)
+  (with-once-only (file-path)
+    (with-gensyms (p-io-context ret)
+      `(with-foreign-object (,p-io-context :pointer)
+	 (let ((,ret (avio-open ,p-io-context ,file-path 2)))
+	   (unless (= ,ret 0) (error 'ffmpeg-fault :msg (% "could not open ~a for writing" ,file-path) :code ,ret))
+	   (setf (format-context-pb ,format-context) (mem-ref ,p-io-context :pointer))
+	   (unwind-protect
+		(progn
+		  ,@body)
+	     (avio-close (format-context-pb ,format-context))))))))
+
+(defun test-ffmpeg!(&optional (stream-type :avmedia-type-audio))
   (av-register-all)
   (let ((frames 0))
     (with-input-stream (p-format-context-in p-codec-context-in stream-idx "/mnt/MUSIC-THD/test.hd.mp4" stream-type)
-      (with-audio-encoder (p-codec-context-out "libmp3lame" :num-channels 2 :bit-rate 64000) 
+      (with-new-audio-encoder (p-codec-context-out "libmp3lame" :num-channels 2 :bit-rate 128000) 
 	(with-av-frame frame
 	  (in-frame-read-loop p-format-context-in stream-idx packet-in
 	    (with-decoded-frame (p-codec-context-in stream-type frame packet-in)
 	      (with-encoded-packet (p-codec-context-out stream-type packet-out frame)
 		(incf frames)
 		(format t "frame-count:~a~%" frames))))
-	    (format t "frames-count:~a decode-context:~a~%" frames p-codec-context-in)))))))
+	  (format t "frames-count:~a decode-context:~a~%" frames p-codec-context-in))))))
+
+(defun test-ffmpeg(&optional (stream-type :avmedia-type-audio))
+  (let ((file-path "/mnt/MUSIC-THD/dummy.mp3"))
+    (av-register-all)
+    (let ((frames 0))
+      (with-input-stream (p-format-context-in p-codec-context-in stream-idx "/mnt/MUSIC-THD/test.hd.mp4" stream-type)
+	(with-open-output (p-format-context-out file-path)
+	  (with-audio-encoder (p-codec-context-out p-format-context-out stream-type :num-channels 1 :bit-rate 64000)
+	    (with-open-output-file (file-path p-format-context-out)
+	      (with-av-frame frame
+		(avformat-write-header p-format-context-out (null-pointer)) 
+		(in-frame-read-loop p-format-context-in stream-idx packet-in
+		  (with-decoded-frame (p-codec-context-in stream-type frame packet-in)
+		    (with-encoded-packet (p-codec-context-out stream-type packet-out frame)
+		      (incf frames)
+		      (av-interleaved-write-frame p-format-context-out packet-out))))
+		(av-write-trailer p-format-context-out) 
+		(format t "frames-count:~a decode-context:~a~%" frames p-codec-context-in)))))))))
 
 (defun run())
 
