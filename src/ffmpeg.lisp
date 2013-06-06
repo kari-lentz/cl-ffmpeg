@@ -1,5 +1,8 @@
 (in-package :cl-ffmpeg)
 
+(defparameter *AVFMT-GLOBALHEADER* #x40)
+(defparameter *CODEC-FLAG-GLOBAL-HEADER* #x400000)
+
 (define-foreign-library libavformat
   (:unix (:or "/usr/local/lib/libavformat.so"))
   (t (:default "libavformat")))
@@ -249,15 +252,18 @@
   (channels :int)
   (sample-fmt AVSample-Format)
   (sample-rate :int)
-  (bit-rate :int))
+  (bit-rate :int)
+  (flags :int))
 
 (define-ffmpeg-wrappers format-context
   (oformat :pointer)
-  (pb :pointer))
+  (pb :pointer)
+  (flags :int))
 
 (define-ffmpeg-wrappers output-format
   (audio-codec avcodec-id)
-  (video-codec avcodec-id))
+  (video-codec avcodec-id)
+  (flags :int))
 
 (define-ffmpeg-wrappers stream
     (codec :pointer))
@@ -402,7 +408,7 @@
   (setf (codec-context-channel-layout codec-context) (av-get-default-channel-layout num-channels))
   (setf (codec-context-channels codec-context) num-channels)
   (setf (codec-context-sample-rate codec-context) sample-rate)
-  (setf (codec-context-sample-fmt codec-context) (foreign-enum-value 'AVSample-Format :AV-SAMPLE-FMT-S16P))
+  (setf (codec-context-sample-fmt codec-context) (foreign-enum-value 'AVSample-Format :AV-SAMPLE-FMT-S16))
   (when bit-rate (setf (codec-context-bit-rate codec-context) bit-rate)))
 
 (defun get-codec(format-context stream-type)
@@ -410,7 +416,7 @@
     (when (null-pointer-p oformat) (error 'ffmpeg-fault :msg "null output format in format context"))
     (let ((codec-id (foreign-funcall-pointer ([] *codecs* stream-type) () :pointer oformat :int)))
       (let ((ret (avcodec-find-encoder codec-id))) 
-	(when (null-pointer-p ret) (error 'ffmpeg-fault :msg "no encoder for format context"))  
+	(when (null-pointer-p ret) (error 'ffmpeg-fault :msg "no encoder for format context")) 
 	ret))))
 
 (defmacro with-encoder((codec-context codec format-context stream-type) &body body)
@@ -418,6 +424,8 @@
     `(let ((,codec (get-codec ,format-context ,stream-type)))
        (let ((,stream (avformat-new-stream ,format-context ,codec))) 
 	 (let ((,codec-context (stream-codec ,stream)))
+	   (if (> (logand (output-format-flags (format-context-oformat ,format-context)) *AVFMT-GLOBALHEADER*) 0)
+	       (setf (codec-context-flags ,codec-context) (logior (codec-context-flags ,codec-context) *CODEC-FLAG-GLOBAL-HEADER*)))
 	   ,@body)))))
 
 (defmacro with-audio-encoder((codec-context format-context stream-type &key (sample-rate 44100) (num-channels 2) bit-rate) &body body)
@@ -493,12 +501,12 @@
 	  (format t "frames-count:~a decode-context:~a~%" frames p-codec-context-in))))))
 
 (defun test-ffmpeg(&optional (stream-type :avmedia-type-audio))
-  (let ((file-path "/mnt/MUSIC-THD/dummy.mp3"))
+  (let ((file-path "/mnt/MUSIC-THD/dummy.wav"))
     (av-register-all)
     (let ((frames 0))
       (with-input-stream (p-format-context-in p-codec-context-in stream-idx "/mnt/MUSIC-THD/test.hd.mp4" stream-type)
 	(with-open-output (p-format-context-out file-path)
-	  (with-audio-encoder (p-codec-context-out p-format-context-out stream-type :num-channels 1 :bit-rate 64000)
+	  (with-audio-encoder (p-codec-context-out p-format-context-out stream-type :num-channels 2)
 	    (with-open-output-file (file-path p-format-context-out)
 	      (with-av-frame frame
 		(avformat-write-header p-format-context-out (null-pointer)) 
