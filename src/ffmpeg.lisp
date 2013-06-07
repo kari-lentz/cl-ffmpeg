@@ -15,11 +15,18 @@
 
 (use-foreign-library libavcodec)
 
+(define-foreign-library libswresample
+  (:unix (:or "/usr/local/lib/libswresample.so"))
+  (t (:default "libswresample")))
+
+(use-foreign-library libswresample)
+
 (define-foreign-library ffmpeg-wrapper
   (:unix (:or "/usr/local/lib/ffmpeg-wrapper.so"))
   (t (:default "ffmpeg-wrapper")))
 
 (use-foreign-library ffmpeg-wrapper)
+
 
 (defparameter *err-buffer-length* 1024)
 
@@ -230,6 +237,95 @@
 (defcfun ("avio_close" avio-close) :int
   (io-context :pointer))
 
+(defcfun swr-alloc :pointer)
+
+(defcfun swr-alloc-set-opts :pointer
+  (s :pointer)
+  (out_ch_layout :int64)
+  (out-sample-fmt avsample-format)
+  (out-sample-rate :int)
+  (in-ch-layout :int64)
+  (in-sample-fmt avsample-format)
+  (in-sample-rate :int)
+  (log-offset :int)
+  (log-ctx :pointer))
+
+(defcfun swr-set-compensation :int
+  (s :pointer)
+  (sample-delta :int)
+  (compensation-distance :int))
+
+(defcfun swr-init :int
+  (s :pointer))
+
+(defcfun swr-convert :int
+  (s :pointer)
+  (out-buffers :pointer)
+  (out-count :int)
+  (in-buffers :pointer)
+  (in-count :int))
+
+(defcfun swr-free :void
+  (s :pointer))
+
+(defcstruct* wav-header
+  (chunk-id :int32)
+  (chunk-size :int32)
+  (format :int32)
+  (subchunk-iid :int32)
+  (subchunk-1-size :int32)
+  (audio-format :int16)
+  (num-channels :int16)
+  (sample-rate :int32)
+  (byte-rate :int32)
+  (block-align :int16)
+  (bits-per-sample :int16)
+  (subchunk-2-id :int32)
+  (subchunk-2-size :int32))
+
+(defmacro with-setter((macrolet-name prefix object) &body body)
+  `(macrolet((,macrolet-name(symbol value)
+	       `(setf (,(.sym ',prefix '- symbol) ,',object) ,value)))
+     ,@body))
+
+(defmacro with-foreign-setter((setter var type &optional (count 1)) &body body)
+  `(with-foreign-object (,var ',type ,count)
+     (with-setter (,setter ,type ,var)
+       ,@body)))
+
+(defmacro with-wav-header((setter hdr num-channels sample-rate file-size) &body body)
+  `(with-foreign-setter (,setter ,hdr wav-header)
+     (,setter chunk-id #x52494646)
+     (,setter chunk-size (+ 36 ,file-size))
+     (,setter format #x57415654)
+     (,setter subchunk-iid #x666d7420)
+     (,setter subchunk-1-size 16)
+     (,setter audio-format 1)
+     (,setter num-channels ,num-channels)
+     (,setter sample-rate ,sample-rate)
+     (,setter byte-rate (* 2 ,num-channels 2))
+     (,setter block-align (* ,num-channels))
+     (,setter bits-per-sample 16)
+     (,setter subchunk-2-id #x64617641)
+     (,setter subchunk-2-size ,file-size)
+     ,@body))
+
+(defun test-setter()
+  (with-foreign-setter (set* my-header wav-header)
+    (set* format #x57415654)
+    (set* audio-format 1) 
+    (set* SAMPLE-RATE 44100)
+    (format t "~a~%" (wav-header-audio-format my-header))
+    (format t "~a~%" (wav-header-sample-rate my-header))))
+
+(defmacro with-foreign-array-to-lisp((foreign-array foreign-type lisp-array) &body body)
+  (with-once-only (foreign-array lisp-array)
+    (with-gensyms (length idx)
+      `(let ((,length (length ,lisp-array)))
+	   (dotimes (,idx ,length)
+	     (setf (aref ,lisp-array ,idx) (mem-aref ,foreign-array ,foreign-type ,idx)))
+	   ,@body))))
+
 (defmacro define-ffmpeg-wrappers(prefix &body name-types)
   `(progn
      ,@(with-collector 
@@ -405,7 +501,7 @@
 	(AVStream-Overlay-codec stream)))))
 
 (defun set-audio-params(codec-context num-channels sample-rate bit-rate)
-  (setf (codec-context-channel-layout codec-context) (av-get-default-channel-layout num-channels))
+  ;(setf (codec-context-channel-layout codec-context) (av-get-default-channel-layout num-channels))
   (setf (codec-context-channels codec-context) num-channels)
   (setf (codec-context-sample-rate codec-context) sample-rate)
   (setf (codec-context-sample-fmt codec-context) (foreign-enum-value 'AVSample-Format :AV-SAMPLE-FMT-S16))
@@ -487,6 +583,20 @@
 		  ,@body)
 	     (avio-close (format-context-pb ,format-context))))))))
 
+(defmacro with-resample-context(swr-ctx &body body)
+  `(unwind-protect
+	(progn
+	  (swr-init ,swr-ctx)
+	  ,@body)
+     (swr-free ,swr-ctx)))
+  
+(defun set-audio-params!(codec-context num-channels sample-rate bit-rate)
+  ;(setf (codec-context-channel-layout codec-context) (av-get-default-channel-layout num-channels))
+  (setf (codec-context-channels codec-context) num-channels)
+  (setf (codec-context-sample-rate codec-context) sample-rate)
+  (setf (codec-context-sample-fmt codec-context) (foreign-enum-value 'AVSample-Format :AV-SAMPLE-FMT-S16))
+  (when bit-rate (setf (codec-context-bit-rate codec-context) bit-rate)))
+  
 (defun test-ffmpeg!(&optional (stream-type :avmedia-type-audio))
   (av-register-all)
   (let ((frames 0))
@@ -501,23 +611,30 @@
 	  (format t "frames-count:~a decode-context:~a~%" frames p-codec-context-in))))))
 
 (defun test-ffmpeg(&optional (stream-type :avmedia-type-audio))
-  (let ((file-path "/mnt/MUSIC-THD/dummy.wav"))
+  (let ((output-file-path "/mnt/MUSIC-THD/dummy.wav"))
     (av-register-all)
-    (let ((frames 0))
+    (let ((decoded-frames 0)(encoded-packets 0))
       (with-input-stream (p-format-context-in p-codec-context-in stream-idx "/mnt/MUSIC-THD/test.hd.mp4" stream-type)
-	(with-open-output (p-format-context-out file-path)
-	  (with-audio-encoder (p-codec-context-out p-format-context-out stream-type :num-channels 2)
-	    (with-open-output-file (file-path p-format-context-out)
+	(with-open-output (p-format-context-out output-file-path)
+	  (with-audio-encoder (p-codec-context-out p-format-context-out stream-type :num-channels 2 :sample-rate 48000)
+	    (with-open-output-file (output-file-path p-format-context-out)
 	      (with-av-frame frame
 		(avformat-write-header p-format-context-out (null-pointer)) 
 		(in-frame-read-loop p-format-context-in stream-idx packet-in
 		  (with-decoded-frame (p-codec-context-in stream-type frame packet-in)
+		    (incf decoded-frames)
 		    (with-encoded-packet (p-codec-context-out stream-type packet-out frame)
-		      (incf frames)
+		      (incf encoded-packets)
 		      (av-interleaved-write-frame p-format-context-out packet-out))))
 		(av-write-trailer p-format-context-out) 
-		(format t "frames-count:~a decode-context:~a~%" frames p-codec-context-in)))))))))
+		(format t "frames-count:~a: packet-count:~a codec-context-in -> channels:~a sample-rate:~a channel_layout:~a~%" decoded-frames encoded-packets (codec-context-channels p-codec-context-in) (codec-context-sample-rate p-codec-context-in)  (codec-context-channel-layout p-codec-context-in))))))))))
+
+(defcstruct* (AVFrame-Overlay)
+  (data :pointer :count 8)
+  (linesize :int :count 8)
+  (extended-data :pointer)
+  (width :int)
+  (height :int)
+  (nb-samples :int))
 
 (defun run())
-
-
