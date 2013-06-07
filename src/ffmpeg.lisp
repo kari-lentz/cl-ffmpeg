@@ -237,6 +237,42 @@
 (defcfun ("avio_close" avio-close) :int
   (io-context :pointer))
 
+(defcstruct* (AVFrame-Overlay)
+  (data :pointer :count 8)
+  (linesize :int :count 8)
+  (extended-data :pointer)
+  (width :int)
+  (height :int)
+  (nb-samples :int)
+  (format :int))
+
+int av_frame_get_channels	(	const AVFrame * 	frame	)	
+
+(defcfun av-frame-get-channels :int
+  (frame :pointer))
+
+(defcfun av-frame-set-channels :void
+  (frame :pointer)
+  (channels :int))
+
+(defcfun av-frame-get-sample-rate :int
+  (frame :pointer))
+
+(defcfun av-frame-set-sample-rate :void 
+  (frame :pointer)
+  (sample-rate :int))
+
+(defcfun av-frame-get-channel-layout :uint64
+  (frame :pointer))
+
+(defcfun av-frame-set-channel-layout :void 
+  (frame :pointer)
+  (channel-layout :int))
+
+(defcfun av-frame-get-buffer :int
+  (frame :pointer)
+  (align :int))
+
 (defcfun swr-alloc :pointer)
 
 (defcfun swr-alloc-set-opts :pointer
@@ -267,6 +303,14 @@
 
 (defcfun swr-free :void
   (s :pointer))
+
+(defcfun avcodec-fill-audio-frame :int
+  (frame :pointer)
+  (nb-channels :int)
+  (sample-format avsample-format)
+  (buf :pointer)
+  (buf-size :int)
+  (align :int))
 
 (defcstruct* wav-header
   (chunk-id :int32)
@@ -583,13 +627,44 @@
 		  ,@body)
 	     (avio-close (format-context-pb ,format-context))))))))
 
-(defmacro with-resample-context(swr-ctx &body body)
-  `(unwind-protect
-	(progn
-	  (swr-init ,swr-ctx)
-	  ,@body)
-     (swr-free ,swr-ctx)))
-  
+(defparameter *raw-buffer-size* 4096)
+(defparameter *raw-buffer* (foreign-alloc :uint16 :count *raw-buffer-size*))
+
+(defun resample-to-s16(frame-out frame-in &optional (rate 44100))
+
+  (let ((nb-samples (floor (/ (* rate (avframe-overlay-nb-samples frame-in)) (av-frame-get-sample-rate frame-in)))))
+    
+    (let ((swr-ctx (swr-alloc-set-opts 
+		    (null-pointer)
+		    (av-frame-get-channel-layout frame-in)
+		    :av-sample-fmt-s16
+		    rate
+		    (av-frame-get-channel-layout frame-in)
+		    (AVFrame-Overlay-format frame-in) 
+		    (av-frame-get-sample-rate frame-in)
+		    0
+		    (null-pointer))))
+
+      (let ((ret (swr-init swr-ctx)))
+	(unless (= ret 0) (error 'ffmpeg-fault :msg "could not allocate resample context" :code ret))
+	
+	(format t "SAMPLES:~a:~a:~a:~a~%" (avframe-overlay-nb-samples frame-in) (avframe-overlay-width frame-in) (avframe-overlay-height frame-in)(mem-aref (avframe-overlay-linesize frame-out) :uint8  0))
+	(setf (avframe-overlay-nb-samples frame-out) nb-samples)
+	(av-frame-set-channel-layout frame-out (av-frame-get-channel-layout frame-in))
+	(av-frame-set-channels frame-out (av-frame-get-channels frame-in))
+	(av-frame-set-sample-rate frame-out rate) 
+	(setf (avframe-overlay-format frame-out) (foreign-enum-value 'avsample-format :av-sample-fmt-s16))
+	
+	(let ((ret (av-frame-get-buffer frame-out 0)))
+	  (unless (= ret 0) (error 'ffmpeg-fault :msg "could not allocate buffer" :code ret)))
+
+	(unwind-protect
+	     (progn		
+	       (swr-convert swr-ctx (avframe-overlay-data frame-out) nb-samples (avframe-overlay-data frame-in) (avframe-overlay-nb-samples frame-in)))
+	  (with-foreign-object (holder :pointer)
+	    (setf (mem-ref holder :pointer) swr-ctx)
+	    (swr-free holder)))))))
+
 (defun set-audio-params!(codec-context num-channels sample-rate bit-rate)
   ;(setf (codec-context-channel-layout codec-context) (av-get-default-channel-layout num-channels))
   (setf (codec-context-channels codec-context) num-channels)
@@ -610,7 +685,7 @@
 		(format t "frame-count:~a~%" frames))))
 	  (format t "frames-count:~a decode-context:~a~%" frames p-codec-context-in))))))
 
-(defun test-ffmpeg(&optional (stream-type :avmedia-type-audio))
+(defun test-ffmpeg!!(&optional (stream-type :avmedia-type-audio))
   (let ((output-file-path "/mnt/MUSIC-THD/dummy.wav"))
     (av-register-all)
     (let ((decoded-frames 0)(encoded-packets 0))
@@ -625,16 +700,36 @@
 		    (incf decoded-frames)
 		    (with-encoded-packet (p-codec-context-out stream-type packet-out frame)
 		      (incf encoded-packets)
+		      (format t "frame info ~a:~a:~a:~%" (AVFrame-Overlay-format frame) (AVFrame-Overlay-data frame) (AVFrame-Overlay-extended-data frame)) 
 		      (av-interleaved-write-frame p-format-context-out packet-out))))
 		(av-write-trailer p-format-context-out) 
 		(format t "frames-count:~a: packet-count:~a codec-context-in -> channels:~a sample-rate:~a channel_layout:~a~%" decoded-frames encoded-packets (codec-context-channels p-codec-context-in) (codec-context-sample-rate p-codec-context-in)  (codec-context-channel-layout p-codec-context-in))))))))))
 
-(defcstruct* (AVFrame-Overlay)
-  (data :pointer :count 8)
-  (linesize :int :count 8)
-  (extended-data :pointer)
-  (width :int)
-  (height :int)
-  (nb-samples :int))
+(defun test-ffmpeg(&optional (stream-type :avmedia-type-audio))
+  (let ((output-file-path "/mnt/MUSIC-THD/dummy.wav"))
+    (av-register-all)
+    (let ((decoded-frames 0)(encoded-packets 0))
+      (with-input-stream (p-format-context-in p-codec-context-in stream-idx "/mnt/MUSIC-THD/test.hd.mp4" stream-type)
+	(with-open-output (p-format-context-out output-file-path)
+	  (with-audio-encoder (p-codec-context-out p-format-context-out stream-type :num-channels 2 :sample-rate 22500)
+	    (with-open-output-file (output-file-path p-format-context-out)
+	      (with-av-frame frame-in
+		(avformat-write-header p-format-context-out (null-pointer)) 
+
+		(in-frame-read-loop p-format-context-in stream-idx packet-in
+		  (with-decoded-frame (p-codec-context-in stream-type frame-in packet-in)
+		    (incf decoded-frames)
+		    (with-av-frame frame-out
+		      (resample-to-s16 frame-out frame-in 48000)
+		      (format t "ABOUT TO ENCODE~%")
+		      (with-encoded-packet (p-codec-context-out stream-type packet-out frame-out)
+			(incf encoded-packets)
+			(format t "at frame:~a~%" encoded-packets) 
+			(av-interleaved-write-frame p-format-context-out packet-out)))))
+
+		(av-write-trailer p-format-context-out) 
+		(format t "frames-count:~a: packet-count:~a codec-context-in -> channels:~a sample-rate:~a channel_layout:~a~%" decoded-frames encoded-packets (codec-context-channels p-codec-context-in) (codec-context-sample-rate p-codec-context-in)  (codec-context-channel-layout p-codec-context-in))))))))))
+
 
 (defun run())
+
