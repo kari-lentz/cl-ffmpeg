@@ -41,14 +41,22 @@
 
 (defmacro memcpy-call(dest-buffer dest-idx src-buffer src-idx size)
   (flet ((foreign-buffer(buffer idx)
-	   `(mem-aref ,buffer :uint8 ,idx)))
+	   `(mem-aptr ,buffer :uint8 ,idx)))
   `(memcpy ,(foreign-buffer dest-buffer dest-idx) ,(foreign-buffer src-buffer src-idx) ,size)))
 
 (defun foreign-byte-size(size element-type)
   (* (foreign-type-size element-type) size))
 
+(defmacro loop-down((size segment control) &body body)
+  (with-once-only (size segment)
+    (with-gensyms (remaining)
+      `(do ((,remaining ,size)) ((<= ,remaining 0))
+	 (let ((,control (min ,remaining ,segment)))
+	   (decf ,remaining ,control)
+	   ,@body)))))
+
 (defun make-foreign-ring-buffer(size &key (element-type :uint8))
-  (let ((!buffer (foreign-alloc element-type))
+  (let ((!buffer (foreign-alloc element-type :count size))
 	(!read-ptr 0)
 	(!write-ptr 0)
 	(!size (foreign-byte-size size element-type))
@@ -66,70 +74,121 @@
 		      (mod (- !write-ptr !read-ptr) !size))))
 	   (flet ((get-room-count()
 		    (- !size (get-fill-count))))
-	     (dlambda 
 
-	       (:write (buffer size) 
-		       (block process
-			 (unless (> size 0)(return-from process))
-			 (let ((size (foreign-byte-size size !element-type)))
-			   (with-lock-held (!lock)
-			     (loop while (> size (get-room-count)) do
-				  (when !error-p (error "Encounter buffer error in read process"))
-				  (condition-wait !full-state !lock)))
-
-			   (loop for (dest-idx src-idx size) in (memcpy-params !size !write-ptr size)
-			      do
-				(memcpy-call !buffer dest-idx buffer src-idx size))
-
-			   (with-lock-held (!lock)
-			     (setf !write-ptr (mod (+ !write-ptr size) !size))
-			     (when (= !write-ptr !read-ptr)
-			       (setf !full-p t))
-			     (condition-notify !empty-state)))))
-
-	       (:read (buffer size)
-		      (block process
-			(unless (> size 0) (return-from process))
-			(let ((size (foreign-byte-size size !element-type)))
-			  (with-lock-held (!lock) 
-			    (loop while (< size (get-fill-count)) do
-				 (when !error-p (error "Encounter buffer error in write process"))
-				 (when !eof-p (error "Encounter eof in write process"))
-				 (condition-wait !empty-state !lock)))
-
-			  (loop for (src-idx dest-idx size) in (memcpy-params !size !read-ptr size)
-			     do
-			       (memcpy-call buffer dest-idx !buffer src-idx size))
+	     (flet ((buffer-write(buffer size)
+		      (with-lock-held (!lock)
+			(loop while (> size (get-room-count)) do
+			     (when !error-p (error "Encounter buffer error in read process"))
+			     (condition-wait !full-state !lock)))
 			  
-			  (with-lock-held (!lock)
-			    (setf !read-ptr (mod (+ !read-ptr size) !size))
-			    (setf !full-p nil)
-			    (condition-notify !full-state)))))
-	       (:set-eof ()
-			 (with-lock-held (!lock)
-			   (setf !eof-p t)))
-	       (:set-error ()
+		      (loop for (dest-idx src-idx size) in (memcpy-params !size !write-ptr size)
+			 do
+			   (memcpy-call !buffer dest-idx buffer src-idx size))
+			  
+		      (with-lock-held (!lock)
+			(setf !write-ptr (mod (+ !write-ptr size) !size))
+			(when (= !write-ptr !read-ptr)
+			  (setf !full-p t))
+			(condition-notify !empty-state)))
+		    (buffer-read(buffer size)
+		      (with-lock-held (!lock) 
+			(loop while (> size (get-fill-count)) do
+			     (when !error-p (error "Encounter buffer error in write process"))
+			     (when !eof-p (error "Encounter eof in write process"))
+			     (condition-wait !empty-state !lock)))
+			    
+		      (loop for (src-idx dest-idx size) in (memcpy-params !size !read-ptr size)
+			 do
+			   (memcpy-call buffer dest-idx !buffer src-idx size))
+			    
+		      (with-lock-held (!lock)
+			(setf !read-ptr (mod (+ !read-ptr size) !size))
+			(setf !full-p nil)
+			(condition-notify !full-state))))
+	       
+	       (dlambda 
+	       
+		 (:write (buffer size)
+			 (block process
+			   (unless (> size 0)(return-from process))
+			   (let ((size (foreign-byte-size size !element-type))(idx 0))
+			     (loop-down (size !size request-size)
+				(buffer-write (mem-aptr buffer :uint8 idx) request-size)
+				(incf idx request-size)))))
+					      
+		 (:read (buffer size)
+			(block process
+			  (unless (> size 0) (return-from process))
+			  (let ((size (foreign-byte-size size !element-type))(idx 0))
+			    (loop-down (size !size request-size)
+			       (buffer-read (mem-aptr buffer :uint8 idx) request-size)
+			       (incf idx request-size)))))
+
+		 (:set-eof ()
 			   (with-lock-held (!lock)
-			     (setf !error-p t)))))))
+			     (setf !eof-p t)
+			     (condition-notify !full-state)
+			     (condition-notify !empty-state)))
+		 (:set-error ()
+			     (with-lock-held (!lock)
+			       (condition-notify !full-state)
+			       (condition-notify !empty-state)
+			       (setf !error-p t)))))))
+      
+      (release-lock !lock))))
 
-    (release-lock !lock)))
+(defparameter *thread-id* 0)
 
-(defun test()
-  (let ((buffer (make-ring-buffer 4)))
-    (funcall buffer :write 10)
-    (funcall buffer :write 11)
-    (funcall buffer :read)
-    (funcall buffer :read)
-    (funcall buffer :write 12)
-    (funcall buffer :write 13)
-    (funcall buffer :write 14)
-    (funcall buffer :read2)))
+(defun my-thread()
+  (loop for idx from 1 to 1000 do
+       (format *standard-output* "THIS IS IT:~a:~a~%" idx *thread-id*)))
 
-(defun test-array-1()
-  (let ((numbers (make-array 10 :element-type 'integer)))
-    (loop for n in (range 10) do
-	 (setf (aref numbers n) (+ (* n 10) n)))
-    (setf (subseq numbers 5 8) #(100 200 300))
-    numbers))
+(defun test-thread!()
+  (make-thread #'my-thread :initial-bindings `((*standard-output* . ,*standard-output*))))
+
+(defmacro with-thread((name bindings thread-body) &body body) 
+  (with-gensyms (thread)
+    `(let ((,thread (make-thread (lambda() ,thread-body) :initial-bindings (list ,@(loop for (var value) in bindings collecting `(cons ,(list 'quote var) ,value))) :name ,name)))
+       (unwind-protect
+	    (progn
+	      ,@body)
+	 (join-thread ,thread)))))
+
+(defun test-thread()
+  (with-thread ("MY-THREAD" 
+		((*standard-output* *standard-output*) (*thread-id* 1)) 
+		(my-thread))
+    (with-thread ("MY-NEXT-THREAD"
+		  ((*standard-output* *standard-output*) (*thread-id* 2))
+		  (my-thread))
+    (format t "STARTED UP A THREADs~%"))))
+
+(defparameter *my-buffer* (make-foreign-ring-buffer 1024 :element-type :int))
+
+(defun make-iter(&optional (init 0) (delta 1))
+  (dlambda 
+    (:inc ()
+	  (post-fix init
+		    (incf init delta)))))
+
+(defun test-buffer() 
+  (With-thread ("WRITE-PROCESS" 
+		((*standard-output* *standard-output*) (*my-buffer* *my-buffer*)) 
+		(let ((buffer-length 1024)(iter (make-iter)))
+		  (with-foreign-object (buffer :int buffer-length)
+		    (for-each-range (idx buffer-length)
+		      (setf (mem-aref buffer :int idx) (funcall iter :inc)))
+		    (funcall *my-buffer* :write buffer buffer-length)
+		    (funcall *my-buffer* :set-eof))))
+    (let ((buffer-length 1024)) 
+      (with-foreign-object (buffer :int buffer-length)
+	(funcall *my-buffer* :read buffer buffer-length)
+	(for-each-range (idx buffer-length)
+	  (format t "~a:~a~%" idx (mem-aref buffer :int idx)))))))
+
+(defun kill-write-processes()
+  (loop for thread in (bordeaux-threads:all-threads) when (~ "WRITE-PROCESS" (thread-name thread))
+       do (format t "~a~%" thread)))
+       
 
 (defun run())
