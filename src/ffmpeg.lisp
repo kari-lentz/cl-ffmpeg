@@ -27,7 +27,6 @@
 
 (use-foreign-library ffmpeg-wrapper)
 
-
 (defparameter *err-buffer-length* 1024)
 
 (defmacro define-dummy-enums(&rest enums)
@@ -43,7 +42,7 @@
        ,@(loop for item in fields collecting 
 	      (let ((slot-name (get-first-atom item)))
 		`(defmacro ,(.sym (get-first-atom name-and-options) '- (get-first-atom item)) (ptr) 
-		   `(foreign-slot-value ,ptr ,'',type ,'',slot-name)))))))
+		   `(foreign-slot-value ,ptr ,''(:struct ,type) ,'',slot-name)))))))
 
 (defcenum AVDuration-Estimation-Method
   :AVFMT-DURATION-FROM-PTS 
@@ -139,7 +138,7 @@
   (size :int)
   (stream-index :int)
   (flags :int)
-  (side-data AvPacket-Side-Data)
+  (side-data (:struct AvPacket-Side-Data))
   (side-data-elems :int)
   (duration :int)
   (pos :int64)
@@ -246,8 +245,6 @@
   (nb-samples :int)
   (format :int))
 
-int av_frame_get_channels	(	const AVFrame * 	frame	)	
-
 (defcfun av-frame-get-channels :int
   (frame :pointer))
 
@@ -333,7 +330,7 @@ int av_frame_get_channels	(	const AVFrame * 	frame	)
      ,@body))
 
 (defmacro with-foreign-setter((setter var type &optional (count 1)) &body body)
-  `(with-foreign-object (,var ',type ,count)
+  `(with-foreign-object (,var '(:struct ,type) ,count)
      (with-setter (,setter ,type ,var)
        ,@body)))
 
@@ -422,16 +419,19 @@ int av_frame_get_channels	(	const AVFrame * 	frame	)
 (define-foreign-call-pointers *encoders* (:avmedia-type-audio avcodec-encode-audio2)(:avmedia-type-video avcodec-decode-video2))
 (define-foreign-call-pointers *codecs* (:avmedia-type-audio output-format-get-audio-codec)(:avmedia-type-video output-format-get-video-codec))
 
-(defmacro with-av-pointer(ptr allocator &body body)
+(defmacro free-av-double-pointer(ptr &optional (free-function 'avfreep))
   (with-gensyms (holder)
-    `(let ((,ptr ,allocator))
-       (unless (null-pointer-p ,ptr)
-	 (unwind-protect
-	      (progn
-		,@body)
-	   (with-foreign-object (,holder :pointer)
-	     (setf (mem-ref ,holder :pointer) ,ptr)
-	     (avfreep ,holder)))))))
+    `(with-foreign-object (,holder :pointer)
+       (setf (mem-ref ,holder :pointer) ,ptr)
+       (,free-function ,holder))))
+
+(defmacro with-av-pointer((ptr allocator &optional (free-function 'avfreep)) &body body)
+  `(let ((,ptr ,allocator))
+     (unless (null-pointer-p ,ptr)
+       (unwind-protect
+	    (progn
+	      ,@body)
+	 (free-av-double-pointer ,ptr ,free-function)))))
 
 (defmacro with-av-frame(av-frame &body body)
   (with-gensyms (holder)
@@ -457,7 +457,7 @@ int av_frame_get_channels	(	const AVFrame * 	frame	)
 		  (av-frame-free ,holder)))))))
 
 (defmacro with-av-packet(av-packet &body body)
-  `(with-foreign-object(,av-packet 'AVPacket)
+  `(with-foreign-object(,av-packet '(:struct AVPacket))
      (av-init-packet ,av-packet)
      (unwind-protect
 	  (progn
@@ -578,7 +578,7 @@ int av_frame_get_channels	(	const AVFrame * 	frame	)
 (defmacro with-new-encoder((codec-context codec name) &body body)
   `(let ((,codec (avcodec-find-encoder-by-name ,name)))
      (when (null-pointer-p ,codec) (error 'ffmpeg-fault :msg (% "codec ~a not found" ,name)))
-     (with-av-pointer ,codec-context (avcodec-alloc-context3 ,codec)
+     (with-av-pointer (,codec-context (avcodec-alloc-context3 ,codec))
        (when (null-pointer-p ,codec-context) (error 'ffmpeg-fault :msg (% "failed to open codec context:~a" ,name)))
        (unwind-protect
 	    (progn
@@ -629,6 +629,45 @@ int av_frame_get_channels	(	const AVFrame * 	frame	)
 
 (defparameter *raw-buffer-size* 4096)
 (defparameter *raw-buffer* (foreign-alloc :uint16 :count *raw-buffer-size*))
+
+(defmacro with-restarter((ptr reallocator allocator-function (&body changing-parameters) free-function double-pointer-free-p) &body body)
+  (let ((old-vars (qmap (param) (gensym (string-upcase (symbol-name param))) changing-parameters)))
+    `(let ((,ptr (,allocator-function ,@changing-parameters)))
+       (macrolet ,reallocator ,changing-parameters
+		 `(unless (and ,(qmap `(equalp ,param ,old-param) (list ,@changing-parameters) (list ,@old-vars)))
+		   (if ,,double-pointer-free-p 
+		       (free-av-double-pointer ,,ptr ,,free-function) 
+		       (,,free-function ,,ptr))
+		   (setf ,,ptr (,,allocator-function ,,@changing-parameters)))
+		 (unwind-protect
+		      (progn
+			,@body)
+		   (if ,double-pointer-free-p 
+		       (free-av-double-pointer ,ptr ,free-function) 
+		       (,free-function ,ptr)))))))
+
+(defun test-realloc()
+  (macroexpand-1
+   `(with-restarter (swr-ctx swr-realloc swr-context (x y z a b c) swr-free t)
+      (list x y z a b c))))
+
+(defun swr-context(out-channel-layout out-sample-rate in-channel-layout in-sample-format in-sample-rate)
+
+  (let((swr-ctx (swr-alloc-set-opts 
+		 (null-pointer)
+		 out-channel-layout
+		 :av-sample-fmt-s16
+		 out-sample-rate
+		 in-channel-layout
+		 in-sample-format 
+		 in-sample-rate
+		 0
+		 (null-pointer))))
+    
+    (let ((ret (swr-init swr-ctx)))
+      (unless (= ret 0) (error 'ffmpeg-fault :msg "could not allocate resample context" :code ret))
+      swr-ctx)))
+
 
 (defun resample-to-s16(frame-out frame-in &optional (rate 44100))
 
