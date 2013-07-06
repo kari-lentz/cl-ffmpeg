@@ -309,6 +309,68 @@
   (buf-size :int)
   (align :int))
 
+(defcenum av-lock-op
+  :av-lock-create
+  :av-lock-obtain
+  :av-lock-release
+  :av-lock-destroy)
+
+(defcfun av-lockmgr-register :int
+  (callback :pointer))
+
+(defstruct (thread-control (:constructor thread-control (lisp-lock foreign-lock-hash-table sequence-num))) lisp-lock foreign-lock-hash-table sequence-num)
+  
+(defparameter *thread-locks* (make-hash-table))
+(defparameter *thread-control* (thread-control (bordeaux-threads:make-lock "FFMPEG-LOCK") *thread-locks* 0))
+
+(defmacro with-foreign-lock(thread-control &body body)
+  `(with-slots (lisp-lock foreign-lock-hash-table sequence-num) ,thread-control
+     (bordeaux-threads:with-lock-held (lisp-lock)
+       ,@body)))
+  
+(defun create-lock(thread-control)
+  (with-foreign-lock thread-control
+    (setf (gethash sequence-num foreign-lock-hash-table) (bordeaux-threads:make-lock))
+    (post-fix sequence-num
+	      (incf sequence-num))))
+
+(defun acquire-lock(thread-control lock-key)
+  (with-foreign-lock thread-control
+    (aif (gethash lock-key foreign-lock-hash-table)
+	 (bordeaux-threads:acquire-lock it)
+	 (error (% "ffmpeg acquire: lock not found for sequence~a" sequence-num)))))
+
+(defun release-lock(thread-control lock-key)
+  (with-foreign-lock thread-control
+    (aif (gethash lock-key foreign-lock-hash-table)
+	 (bordeaux-threads:release-lock it)
+	 (error (% "ffmpeg release lock not found for sequence~a" sequence-num)))))
+
+(defun destroy-lock(thread-control lock-key)
+  (with-foreign-lock thread-control
+    (remhash  lock-key foreign-lock-hash-table)))
+
+(defcallback my-lock-mgr :int ((arg :pointer)(op av-lock-op))
+  (flet ((log*(msg)
+	   (format *standard-output* "LOCK MGR:~a~%" msg)))
+    (handler-case
+	(progn
+	  (case op
+	    (:av-lock-create
+	     (log* "create")
+	     (setf (mem-ref arg :int) (create-lock *thread-control*)))
+	    (:av-lock-obtain
+	     (log* "obtain")
+	     (acquire-lock *thread-control* (mem-ref arg :int)))
+	    (:av-lock-release
+	     (log* "release")
+	     (release-lock *thread-control* (mem-ref arg :int)))
+	    (:av-lock-destroy
+	     (log* "destroy")
+	     (destroy-lock *thread-control* (mem-ref arg :int))))
+	  0)
+      (error()))))
+
 (defcstruct* wav-header
   (chunk-id :int32)
   (chunk-size :int32)
@@ -623,10 +685,18 @@
 		      ,@body)
 		 (avformat-free-context ,p-format-context))))))))
 
+(defun ensure-file-gone(file-path)
+  (handler-case
+      (progn
+	(close (open file-path))
+	(delete-file file-path))
+    (sb-int:simple-file-error())))
+
 (defmacro with-open-output-file((file-path format-context) &body body)
   (with-once-only (file-path)
     (with-gensyms (p-io-context ret)
       `(with-foreign-object (,p-io-context :pointer)
+	 (ensure-file-gone ,file-path)
 	 (let ((,ret (avio-open ,p-io-context ,file-path 2)))
 	   (unless (= ,ret 0) (error 'ffmpeg-fault :msg (% "could not open ~a for writing" ,file-path) :code ,ret))
 	   (setf (format-context-pb ,format-context) (mem-ref ,p-io-context :pointer))
@@ -709,10 +779,10 @@
 	    ,@body)
        (close-swr-context-mgr ,swr-ctx-mgr))))
 	     
-(defun resample-to-s16(swr-ctx-mgr frame-out frame-in &optional (rate 44100))
+(defun resample-to-s16(swr-ctx-mgr frame-out frame-in &optional (rate 44100) (num-channels 2))
 
   (let ((nb-samples (ceiling  (/ (* rate (avframe-overlay-nb-samples frame-in)) (av-frame-get-sample-rate frame-in)))))
-    (let ((swr-ctx (acquire-swr-context swr-ctx-mgr (av-frame-get-channel-layout frame-in) rate (av-frame-get-channel-layout frame-in) (AVFrame-Overlay-format frame-in) (av-frame-get-sample-rate frame-in))))
+    (let ((swr-ctx (acquire-swr-context swr-ctx-mgr (av-get-default-channel-layout num-channels)  rate (av-frame-get-channel-layout frame-in) (AVFrame-Overlay-format frame-in) (av-frame-get-sample-rate frame-in))))
 	
       (setf (avframe-overlay-nb-samples frame-out) nb-samples)
       (av-frame-set-channel-layout frame-out (av-frame-get-channel-layout frame-in))
@@ -739,9 +809,11 @@
 		(format t "frame-count:~a~%" frames))))
 	  (format t "frames-count:~a decode-context:~a~%" frames p-codec-context-in))))))
 
-(defun test-ffmpeg!!(&optional (stream-type :avmedia-type-audio) (sample-rate 44100))
+(defun test-ffmpeg-serial(&optional (stream-type :avmedia-type-audio) (sample-rate 44100))
   (let ((output-file-path "/mnt/MUSIC-THD/dummy.wav"))
     (av-register-all)
+    (let ((ret (av-lockmgr-register (callback my-lock-mgr))))
+      (unless (= ret 0) (error 'ffmpeg-fault :code ret :msg "could not register lock manager")))
     (with-swr-context-mgr swr-ctx-mgr
       (let ((decoded-frames 0)(encoded-packets 0))
 	(with-input-stream (p-format-context-in p-codec-context-in stream-idx "/mnt/MUSIC-THD/test.hd.mp4" stream-type)
@@ -782,6 +854,9 @@
 	   (setf (mem-ref ,holder :pointer) ,av-frame)
 	   (av-frame-free ,holder))))))
 
+(defun volume-test()
+  (dotimes (x 20) (progn (test-ffmpeg-serial) (format t "time #~a~%" x))))
+
 (defun run())
 
 (defmacro with-users(&body body)
@@ -795,5 +870,8 @@
 		,@body)
 	   (format ,stream "CLOSING DOWN#1~%")
 	   (format ,stream "CLOSING DOWN#2~%"))))))
+
+       
+			       
 	 
 	  
