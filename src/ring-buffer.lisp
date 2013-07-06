@@ -143,29 +143,20 @@
   (loop for idx from 1 to 500 do
        (format *standard-output* "THIS IS IT:~a:~a~%" idx *thread-id*)))
 
-(defmacro with-thread((name bindings thread-body) &body body) 
-  (with-gensyms (thread)
-    `(let ((,thread (make-thread 
-		     (lambda() ,thread-body) 
-		     :initial-bindings (list ,@(loop for binding in bindings 
-						  collecting 
-						    (if (atom binding)
-							`(cons ,(list 'quote binding) ,binding)
-							(destructuring-bind (var value) binding
-							  `(cons ,(list 'quote var) ,value))))) 
-		     :name ,name)))
-       (unwind-protect
-	    (progn
-	      ,@body)
-	 (join-thread ,thread)))))
+(defun foo()
+  (macroexpand-1
+   '(with-thread ("MY-NEXT-THREAD"
+		  (*standard-output* (*thread-id* 2))
+		  (my-thread))
+     (format t "STARTED UP A THREADs~%"))))
 
 (defun test-thread()
   (let ((*thread-id* 1))
     (with-thread ("MY-THREAD" 
-		  (*standard-output* *thread-id*) 
+		  (*thread-id*) 
 		  (my-thread))
       (with-thread ("MY-NEXT-THREAD"
-		    ((*standard-output* *standard-output*) (*thread-id* 2))
+		    ((*thread-id* 2))
 		    (my-thread))
 	(format t "STARTED UP A THREADs~%")))))
 
@@ -183,7 +174,7 @@
 (defun test-buffer(&key (freq 1) (message-length 4096) (buffer-length 1024) (delay-reader-p) (delay-writer-p))
   (with-foreign-ring-buffer (my-buffer buffer-length :element-type :int)
     (with-thread ("WRITE-PROCESS" 
-		  (*standard-output* *error-output*) 
+		  () 
 		  (let ((buffer-length message-length)(iter (make-iter)))
 		    (with-foreign-object (buffer :int buffer-length)
 		      (loop for n from 1 to freq do
@@ -206,5 +197,4 @@
        (format t "~a~%" thread)
        (destroy-thread thread)))
        
-
 (defun run())
