@@ -203,7 +203,7 @@
     (setf (mem-aref c-buffer :int idx) (funcall iter :inc)))
   (funcall ring-buffer :write c-buffer num-samples))
 
-(defun test-buffer(&key (freq 1) (message-length 4096) (buffer-length 1024) (delay-reader-p) (delay-writer-p))
+(defun test-buffer(&key (freq 1) (message-length 4096) (buffer-length 1024) (delay-reader-p) (delay-writer-p) (randomnize-p))
   (with-foreign-ring-buffer (my-buffer buffer-length :element-type :int)
     (with-thread ("WRITE-PROCESS" 
 		  () 
@@ -214,7 +214,7 @@
 			(write-buffer 3)
 			(loop for n from 1 to freq do
 			     (when delay-writer-p (sleep 3))
-			     (write-buffer buffer-length)) 
+			     (write-buffer (if randomnize-p (floor (* (random 1.0) buffer-length)) buffer-length))) 
 			;(write-buffer iter (ash buffer-length -1))
 			(write-buffer 3)
 			(funcall my-buffer :set-eof)))))
