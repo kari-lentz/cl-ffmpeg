@@ -355,7 +355,7 @@
 (defcallback my-lock-mgr :int ((arg :pointer)(op av-lock-op))
   (macrolet ((log*(msg)
 	       `(when *debug-lock-mgr*
-		  (format *standard-output* "LOCK MGR:~a~%" ,msg))))
+		  (format *standard-output* "LOCK MGR:~a THREAD-CONTROL:~a~%" ,msg *thread-control*))))
     (handler-case
 	(progn
 	  (case op
@@ -714,9 +714,6 @@
      (with-open-output-file (,file-path ,format-context)
        ,@body)))
 
-(defparameter *raw-buffer-size* 4096)
-(defparameter *raw-buffer* (foreign-alloc :uint16 :count *raw-buffer-size*))
-
 (defmacro with-restarter((ptr reallocator allocator-function (&body changing-parameters) free-function double-pointer-free-p) &body body)
   (let ((old-vars (qmap (param) (gensym (string-upcase (symbol-name param))) changing-parameters)))
     `(let ((,ptr (,allocator-function ,@changing-parameters)))
@@ -800,16 +797,32 @@
 	 (unless (= ,ret 0) (error 'ffmpeg-fault :msg "could not allocate buffer" :code ,ret)))
        ,@body)))
     
-(defmacro with-resampled-frame((frame-out swr-ctx-mgr frame-in &optional (rate 44100)) &body body)
-  (with-gensyms(nb-samples swr-ctx num-channels)
-    `(let ((,nb-samples (ceiling  (/ (* ,rate (avframe-overlay-nb-samples ,frame-in)) (av-frame-get-sample-rate ,frame-in))))(,num-channels (av-frame-get-channels frame-in)))
+(defmacro with-resampled-frame((frame-out swr-ctx-mgr frame-in &optional (rate 44100) (num-channels 2)) &body body)
+  (with-gensyms(nb-samples swr-ctx)
+    `(let ((,nb-samples (ceiling  (/ (* ,rate (avframe-overlay-nb-samples ,frame-in)) (av-frame-get-sample-rate ,frame-in)))))
       (let ((,swr-ctx (acquire-swr-context ,swr-ctx-mgr (av-get-default-channel-layout ,num-channels) ,rate (av-frame-get-channel-layout ,frame-in) (AVFrame-Overlay-format ,frame-in) (av-frame-get-sample-rate ,frame-in))))
 	(with-buffered-frame (,frame-out ,nb-samples ,rate ,num-channels)
 	  (setf (avframe-overlay-nb-samples ,frame-out) (swr-convert ,swr-ctx (avframe-overlay-data ,frame-out) ,nb-samples (avframe-overlay-data ,frame-in) (avframe-overlay-nb-samples ,frame-in)))
 	  ,@body)))))
+
+(defparameter *ring-buffer-size* 65536)
+(defparameter *out-file-path* nil)
+(defparameter *sample-rate* nil)
+(defparameter *num-channels* 2)
+
+(defcstruct audio-frame
+  (samples :ushort :count 2))
+
+(defstruct (ffmpeg-env (:constructor ffmpeg-env (ring-buffer out-file-path sample-rate num-channels stream-type))) ring-buffer out-file-path sample-rate num-channels stream-type)
  
-(defun write-to-buffer(buffer frame)
-  (funcall buffer :write (avframe-overlay-data frame) (avframe-overlay-nb-samples frame)))
+(defun write-to-buffer(ring-buffer frame)
+  (format t "WRITING NUM-SAMPLES:~a~%" (avframe-overlay-nb-samples frame))
+  (funcall ring-buffer :write (mem-ref (avframe-overlay-data frame) '(:pointer (:struct audio-frame))) (avframe-overlay-nb-samples frame)))
+
+(defun read-from-buffer(ring-buffer frame)
+  (format t "READING NUM-SAMPLES:~a~%" (avframe-overlay-nb-samples frame))
+  (let ((ret (funcall ring-buffer :read (mem-ref (avframe-overlay-data frame) '(:pointer (:struct audio-frame))) (avframe-overlay-nb-samples frame))))
+    (setf (avframe-overlay-nb-samples frame) ret)))
  
 (defun test-ffmpeg!(&optional (stream-type :avmedia-type-audio))
   (av-register-all)
@@ -848,28 +861,54 @@
 		(av-write-trailer p-format-context-out) 
 		(format t "frames-count:~a: packet-count:~a codec-context-in -> channels:~a sample-rate:~a channel_layout:~a~%" decoded-frames encoded-packets (codec-context-channels p-codec-context-in) (codec-context-sample-rate p-codec-context-in)  (codec-context-channel-layout p-codec-context-in))))))))))
 
-(defparameter *ring-buffer-size* 65536)
-(defparameter *out-file-path* nil)
+(defparameter *output-buffer-size* 2048)
 
-(defun file-write()
-   ;(with-open-output-file (*out-file-path* p-format-context-out)
-)
+(defun file-write(ffmpeg-env)
+  (let ((encoded-packets 0))
+    (with-slots (ring-buffer out-file-path sample-rate num-channels stream-type) ffmpeg-env
+      (with-output-sink (p-format-context-out out-file-path)
+	(with-audio-encoder (p-codec-context-out p-format-context-out stream-type :num-channels num-channels :sample-rate sample-rate)
+	  (avformat-write-header p-format-context-out (null-pointer)) 
+	  (format t "ENTERING LOOP:~a:~a:~a~%" *output-buffer-size* sample-rate num-channels )
+	  (loop
+	       (with-buffered-frame (frame-out *output-buffer-size* sample-rate num-channels)
+		 (format t "GOT BUFFERED-FRAME~a~%" encoded-packets)
+		 (let ((ret (read-from-buffer ring-buffer frame-out)))
+		   (with-encoded-packet (p-codec-context-out stream-type packet-out frame-out)
+		     (av-interleaved-write-frame p-format-context-out packet-out)
+		     (incf encoded-packets)
+		     (format t "encoded packets:~a~%" encoded-packets))
+		   (unless (= ret *output-buffer-size*) (return)))))
+	  (av-write-trailer p-format-context-out))))))
 
-(defun ffmpeg-transcode(in-file-path output-file-path &optional (stream-type :avmedia-type-audio) (sample-rate 44100))
+(defun !file-write(ffmpeg-env)
+  (let ((encoded-packets 0))
+    (with-slots (ring-buffer out-file-path sample-rate num-channels stream-type) ffmpeg-env
+      (with-foreign-object (foreign-buffer '(:struct audio-frame))
+	(loop
+	   (let ((ret (funcall ring-buffer :read foreign-buffer *output-buffer-size*)))
+	     (incf encoded-packets)
+	     (format t "READ ~a SAMPLESS:TOTAL-FRAMES:~a" ret encoded-packets)
+	     (unless (= ret *output-buffer-size*) (return))))
+	(format t "DONE READING")))))
+
+(defun ffmpeg-transcode(in-file-path output-file-path &optional (stream-type :avmedia-type-audio) (sample-rate 44100)(num-channels 2))
   (av-register-all)
   (let ((ret (av-lockmgr-register (callback my-lock-mgr))))
     (unless (= ret 0) (error 'ffmpeg-fault :code ret :msg "could not register lock manager")))
-  (with-foreign-ring-buffer (buffer *ring-buffer-size* :element-type :uint)  
-    (with-thread ("FFMPEG-READER" 
-		  ((*out-file-path* output-file-path) *debug-lock-mgr* *thread-control* (*ring-buffer buffer) *ring-buffer-size*)
-		  (file-write))
-      (with-swr-context-mgr swr-ctx-mgr
-	(let ((frames 0))
-	  (in-decoded-frame-read-loop (frame-in in-file-path stream-type)
-	    (incf frames)
-	    (with-resampled-frame (frame-out swr-ctx-mgr frame-in sample-rate)
-	      (write-to-buffer buffer frame-out)
-	      (format t "frames-count:~a~%" frames))))))))
+  (with-foreign-ring-buffer (buffer *ring-buffer-size* :element-type '(:struct audio-frame))
+    (let ((my-ffmpeg-env (ffmpeg-env buffer output-file-path sample-rate num-channels stream-type)))  
+      (with-thread ("FFMPEG-READER" 
+		    (*debug-lock-mgr* *thread-control* *output-buffer-size*)
+		    ;(format t "NOW OR NEVER:~a~%" my-ffmpeg-env))
+		    (file-write my-ffmpeg-env))
+	(with-swr-context-mgr swr-ctx-mgr
+	  (let ((frames 0))
+	    (in-decoded-frame-read-loop (frame-in in-file-path stream-type)
+	      (incf frames)
+	      (with-resampled-frame (frame-out swr-ctx-mgr frame-in sample-rate num-channels)
+		(write-to-buffer buffer frame-out)
+		(format t "decoded frames-count:~a~%" frames)))))))))
 
 (defun test-ffmpeg()
   (ffmpeg-transcode "/mnt/MUSIC-THD/test.hd.mp4" "/mnt/MUSIC-THD/dummy.wav"))
@@ -891,7 +930,97 @@
 	   (format ,stream "CLOSING DOWN#1~%")
 	   (format ,stream "CLOSING DOWN#2~%"))))))
 
-       
-			       
+(defun kill-writers()
+  (loop for thread in (bordeaux-threads:all-threads) when (~ "FFMPEG-READER" (bordeaux-threads:thread-name thread))
+       do 
+       (format t "~a~%" thread)
+       (bordeaux-threads:destroy-thread thread)))
+
+(define-condition ffmpeg-fault(error)
+  ((msg :initarg :msg :reader msg)
+   (code :initform nil :initarg :code :reader code))
+  (:report (lambda(c stream)(if (code c) 
+				(with-foreign-object  (buffer :char *err-buffer-length*)
+				  (av-strerror (code c) buffer *err-buffer-length*)
+				  (format stream "ffmpeg lib:~a error-code:~a:~a" (msg c) (code c) (foreign-string-to-lisp buffer)))
+				  (format stream "ffmpeg lib:~a" (msg c))))))			
+
+
+(with-full-eval
+  (defun default-c-name(lisp-name)
+    (string-downcase (ppcre:regex-replace-all "\\-" (symbol-name lisp-name) "_")))
+  (defun make-function(name)
+    (intern (symbol-name (gensym (symbol-name name))))))
+
+(defmacro ffmpeg-assert(lisp-name function &body args)
+  (with-gensyms (ret)
+    `(let ((,ret (,function ,@args)))
+       (unless (= ,ret 0)
+	 (error 'ffmpeg-fault :msg (% "~a" (list ,(symbol-name lisp-name) ,@args)) :code ,ret))
+       ,ret)))
+
+(with-full-eval
+  (defstruct (cffi-return (:constructor cffi-return (type c-type assert-macro))) type c-type assert-macro)
+
+  (defparameter *cffi-asserts* (make-hash-table))
+
+  (defmacro define-cffi-return-types(return-types)
+    `(progn
+       ,@(loop for (type c-type assert-macro) in return-types collecting 
+	      `(setf (gethash ,type *cffi-asserts*) (cffi-return ,type ,c-type (quote ,assert-macro))))))
+
+  (define-cffi-return-types
+      ((:ffmpeg-int :int ffmpeg-assert)))
+
+  (defun wrap-quote(expr)
+    (list 'quote expr))
+
+  (defun get-c-type(type)
+    (aif (gethash type *cffi-asserts*)
+	 (cffi-return-c-type it)
+	 type)))
+
+(defmacro call-assert(ret-type lisp-name function &rest args)
+  (aif (gethash ret-type *cffi-asserts*)
+       `(,(cffi-return-assert-macro it) ,lisp-name ,function ,@args)
+       `(,function ,@args)))
+
+(defmacro defcfun*(name-and-options return-type &body args)
+
+  (multiple-value-bind (c-name lisp-name new-lisp-name)
+      (if (atom name-and-options)
+	  (values (default-c-name name-and-options) name-and-options (make-function name-and-options))
+	  (let ((c-name (car name-and-options))
+		(lisp-name (car (cdr name-and-options))))
+	    (let ((new-lisp-name (make-function lisp-name)))
+	      (values c-name lisp-name new-lisp-name))))
+    `(progn
+       (defcfun (,c-name ,new-lisp-name) ,(get-c-type return-type)
+	 ,@args)
+       ,(let ((lambda-list (qmap (arg) (get-first-atom arg) args)))
+	     `(defmacro ,lisp-name ,lambda-list
+		`(call-assert ,',return-type ,',lisp-name ,',new-lisp-name ,,@lambda-list))))))
+		  			     
+(defcfun* ("avformat_open_input" avformat-open-input) :ffmpeg-int
+  (ps :pointer)
+  (filename :string)
+  (fmt :pointer)
+  (options :pointer))
+
+(defun test-cffi!()
+  (macroexpand-1
+   '(defcfun* ("avformat_open_input" avformat-open-input) :ffmpeg-int
+     (ps :pointer)
+     (filename :string)
+     (fmt :pointer)
+     (options :pointer))))
+
+(defun test-assert()
+  (macroexpand '(call-assert :ffmpeg-int avformat-open-input pp-format-context file-name (null-pointer) (null-pointer))))
+
+(defun test-cffi(&optional (file-name "/mnt/MUSIC-THD/test.hd.mp4x"))
+  (av-register-all)
+  (with-foreign-objects ((pp-format-context :pointer))
+    (setf (mem-ref pp-format-context :pointer) (null-pointer))
+    (avformat-open-input pp-format-context file-name (null-pointer) (null-pointer)))) 
 	 
-	  
