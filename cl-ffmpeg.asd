@@ -9,5 +9,6 @@
   ((:module src
 	    :components
 	    ((:file "packages")
-	     (:file "ring-buffer" :depends-on ("packages"))
-	     (:file "ffmpeg" :depends-on ("ring-buffer"))))))
+	     (:file "cffi-helper" :depends-on ("packages"))
+	     (:file "ring-buffer" :depends-on ("cffi-helper" "packages"))
+	     (:file "ffmpeg" :depends-on ("ring-buffer" "cffi-helper" packages))))))

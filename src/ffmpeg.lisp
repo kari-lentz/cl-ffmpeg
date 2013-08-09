@@ -29,6 +29,25 @@
 
 (defparameter *err-buffer-length* 1024)
 
+(define-condition ffmpeg-fault(error)
+  ((msg :initarg :msg :reader msg)
+   (code :initform nil :initarg :code :reader code))
+  (:report (lambda(c stream)(if (code c) 
+				(with-foreign-object  (buffer :char *err-buffer-length*)
+				  (av-strerror (code c) buffer *err-buffer-length*)
+				  (format stream "ffmpeg lib:~a error-code:~a:~a" (msg c) (code c) (foreign-string-to-lisp buffer)))
+				(format stream "ffmpeg lib:~a" (msg c))))))			
+
+(defmacro ffmpeg-assert(lisp-name function &body args)
+  (with-gensyms (ret)
+    `(let ((,ret (,function ,@args)))
+       (unless (= ,ret 0)
+	 (error 'ffmpeg-fault :msg (% "~a" (list ,(symbol-name lisp-name) ,@args)) :code ,ret))
+       ,ret)))
+
+(define-cffi-return-types
+    ((:ffmpeg-int :int ffmpeg-assert)))
+
 (defmacro define-dummy-enums(&rest enums)
   `(progn
      ,@(loop for enum in enums collecting
@@ -67,7 +86,7 @@
 
 (defcfun ("av_register_all" av-register-all) :void)
 
-(defcfun ("avformat_open_input" avformat-open-input) :int
+(defcfun* ("avformat_open_input" avformat-open-input) :ffmpeg-int
   (ps :pointer)
   (filename :string)
   (fmt :pointer)
@@ -107,12 +126,12 @@
 (defcfun ("av_freep" avfreep) :void
   (ptr :pointer))
 
-(defcfun ("avcodec_open2" avcodec-open2) :int
+(defcfun* ("avcodec_open2" avcodec-open2) :ffmpeg-int
   (avctx :pointer)
   (codec :pointer)
   (options :pointer))
 
-(defcfun ("avcodec_close" avcodec-close) :int
+(defcfun* ("avcodec_close" avcodec-close) :ffmpeg-int
   (avctx :pointer))
 
 (defcfun ("avformat_close_input" avformat-close-input) :void 
@@ -200,7 +219,7 @@
 (defcfun ("my_test" my-test) :int
     (msg :string))
 
-(defcfun ("avformat_alloc_output_context2" avformat-alloc-output-context2) :int
+(defcfun* ("avformat_alloc_output_context2" avformat-alloc-output-context2) :ffmpeg-int
   (ctx :pointer)
   (oformat :pointer)
   (format_name :string)
@@ -213,7 +232,7 @@
   (format-context :pointer)
   (codec :pointer))
 
-(defcfun ("avformat_write_header" avformat-write-header) :int
+(defcfun* ("avformat_write_header" avformat-write-header) :ffmpeg-int
   (format-context :pointer)
   (options :pointer))
 
@@ -225,15 +244,15 @@
   (format-context :pointer)
   (pkt :pointer))
 
-(defcfun ("av_write_trailer" av-write-trailer) :int
+(defcfun* ("av_write_trailer" av-write-trailer) :ffmpeg-int
     (format-context :pointer))
 
-(defcfun ("avio_open" avio-open) :int
+(defcfun* ("avio_open" avio-open) :ffmpeg-int
   (io-context :pointer)
   (url :string)
   (flags :int))
 
-(defcfun ("avio_close" avio-close) :int
+(defcfun* ("avio_close" avio-close) :ffmpeg-int
   (io-context :pointer))
 
 (defcstruct* (AVFrame-Overlay)
@@ -556,31 +575,28 @@
 	     ,@body))))))
 
 (defmacro with-open-input((p-format-context file-path ) &body body)
-  (with-gensyms (pp-format-context ret)
+  (with-gensyms (pp-format-context)
     `(with-foreign-objects ((,pp-format-context :pointer))
        (setf (mem-ref ,pp-format-context :pointer) (null-pointer))
-       (let ((,ret (avformat-open-input ,pp-format-context ,file-path (null-pointer) (null-pointer))))
-	 (unless (= ,ret 0) (error 'ffmpeg-fault :msg (% "unable to open:~a" ,file-path) :code ,ret))
-	 (let ((,p-format-context (mem-ref ,pp-format-context :pointer)))
-	   (if (not (null-pointer-p ,p-format-context))
-	       (progn
-		 (unwind-protect
-		      (progn
-			,@body)
-		   (avformat-close-input ,pp-format-context)))))))))
+       (avformat-open-input ,pp-format-context ,file-path (null-pointer) (null-pointer))
+       (let ((,p-format-context (mem-ref ,pp-format-context :pointer)))
+	 (if (not (null-pointer-p ,p-format-context))
+	     (progn
+	       (unwind-protect
+		    (progn
+		      ,@body)
+		 (avformat-close-input ,pp-format-context))))))))
 
-(defmacro with-open-codec((codec-context codec &optional name) &body body)
-  (with-gensyms (ret)
-    `(let ((,ret (avcodec-open2 ,codec-context ,codec (null-pointer))))
-       (unless (= ,ret 0) (error 'ffmpeg-fault :msg (% "codec open fault:~a" (or ,name "unknown")) :code ,ret))
-       (unwind-protect
-	    (progn
-	      ,@body)
-	 (avcodec-close ,codec-context)))))
+(defmacro with-open-codec((codec-context codec) &body body)
+  `(progn
+     (avcodec-open2 ,codec-context ,codec (null-pointer))
+     (unwind-protect
+	  (progn
+	    ,@body)
+       (avcodec-close ,codec-context))))
 
-(defun open-codec-2(codec-context codec &optional name)
-  (let ((ret (avcodec-open2 codec-context codec (null-pointer))))
-       (unless (= ret 0) (error 'ffmpeg-fault :msg (% "codec open fault:~a" (or name "unknown")) :code ret))))
+(defun open-codec-2(codec-context codec)
+  (avcodec-open2 codec-context codec (null-pointer)))
        		 
 (defmacro with-input-stream((p-format-context p-codec-context stream-idx file-path media-type) &body body)
   (with-gensyms (pp-codec p-codec)
@@ -663,7 +679,7 @@
     `(with-new-encoder (,codec-context ,codec ,name)
        (set-audio-params ,codec-context ,num-channels ,sample-rate ,bit-rate)
        (when ,bit-rate (setf (codec-context-bit-rate ,codec-context) ,bit-rate))
-       (with-open-codec (,codec-context ,codec ,name) 
+       (with-open-codec (,codec-context ,codec) 
 	 ,@body))))
 
 (defmacro with-encoded-packet((codec-context stream-type packet frame) &body body)
@@ -683,31 +699,29 @@
     (sb-int:simple-file-error())))
 				
 (defmacro with-format-context((p-format-context file-path) &body body)
-  (with-gensyms (pp-format-context ret)
+  (with-gensyms (pp-format-context)
     (with-once-only (file-path)
       `(with-foreign-objects ((,pp-format-context :pointer))
 	 (setf (mem-ref ,pp-format-context :pointer) (null-pointer))
-	 (let ((,ret (avformat-alloc-output-context2 ,pp-format-context (null-pointer) (null-pointer) ,file-path)))
-	   (unless (= ,ret 0) (error 'ffmpeg-fault :msg (% "unable to open:~a" ,file-path) :code ,ret))
-	   (let ((,p-format-context (mem-ref ,pp-format-context :pointer)))
-	     (if (not (null-pointer-p ,p-format-context))
-		 (unwind-protect
-		      (progn
-			,@body)
-		   (avformat-free-context ,p-format-context)))))))))
+	 (avformat-alloc-output-context2 ,pp-format-context (null-pointer) (null-pointer) ,file-path)
+	 (let ((,p-format-context (mem-ref ,pp-format-context :pointer)))
+	   (if (not (null-pointer-p ,p-format-context))
+	       (unwind-protect
+		    (progn
+		      ,@body)
+		 (avformat-free-context ,p-format-context))))))))
 
 (defmacro with-open-output-file((file-path format-context) &body body)
   (with-once-only (file-path)
-    (with-gensyms (p-io-context ret)
+    (with-gensyms (p-io-context)
       `(with-foreign-object (,p-io-context :pointer)
 	 (ensure-file-gone ,file-path)
-	 (let ((,ret (avio-open ,p-io-context ,file-path 2)))
-	   (unless (= ,ret 0) (error 'ffmpeg-fault :msg (% "could not open ~a for writing" ,file-path) :code ,ret))
-	   (setf (format-context-pb ,format-context) (mem-ref ,p-io-context :pointer))
-	   (unwind-protect
-		(progn
-		  ,@body)
-	     (avio-close (format-context-pb ,format-context))))))))
+	 (avio-open ,p-io-context ,file-path 2)
+	 (setf (format-context-pb ,format-context) (mem-ref ,p-io-context :pointer))
+	 (unwind-protect
+	      (progn
+		,@body)
+	   (avio-close (format-context-pb ,format-context)))))))
 
 (defmacro with-output-sink((format-context file-path) &body body)
   `(with-format-context(,format-context ,file-path)
@@ -936,91 +950,32 @@
        (format t "~a~%" thread)
        (bordeaux-threads:destroy-thread thread)))
 
-(define-condition ffmpeg-fault(error)
-  ((msg :initarg :msg :reader msg)
-   (code :initform nil :initarg :code :reader code))
-  (:report (lambda(c stream)(if (code c) 
-				(with-foreign-object  (buffer :char *err-buffer-length*)
-				  (av-strerror (code c) buffer *err-buffer-length*)
-				  (format stream "ffmpeg lib:~a error-code:~a:~a" (msg c) (code c) (foreign-string-to-lisp buffer)))
-				  (format stream "ffmpeg lib:~a" (msg c))))))			
-
-
-(with-full-eval
-  (defun default-c-name(lisp-name)
-    (string-downcase (ppcre:regex-replace-all "\\-" (symbol-name lisp-name) "_")))
-  (defun make-function(name)
-    (intern (symbol-name (gensym (symbol-name name))))))
-
-(defmacro ffmpeg-assert(lisp-name function &body args)
-  (with-gensyms (ret)
-    `(let ((,ret (,function ,@args)))
-       (unless (= ,ret 0)
-	 (error 'ffmpeg-fault :msg (% "~a" (list ,(symbol-name lisp-name) ,@args)) :code ,ret))
-       ,ret)))
-
-(with-full-eval
-  (defstruct (cffi-return (:constructor cffi-return (type c-type assert-macro))) type c-type assert-macro)
-
-  (defparameter *cffi-asserts* (make-hash-table))
-
-  (defmacro define-cffi-return-types(return-types)
-    `(progn
-       ,@(loop for (type c-type assert-macro) in return-types collecting 
-	      `(setf (gethash ,type *cffi-asserts*) (cffi-return ,type ,c-type (quote ,assert-macro))))))
-
-  (define-cffi-return-types
-      ((:ffmpeg-int :int ffmpeg-assert)))
-
-  (defun wrap-quote(expr)
-    (list 'quote expr))
-
-  (defun get-c-type(type)
-    (aif (gethash type *cffi-asserts*)
-	 (cffi-return-c-type it)
-	 type)))
-
-(defmacro call-assert(ret-type lisp-name function &rest args)
-  (aif (gethash ret-type *cffi-asserts*)
-       `(,(cffi-return-assert-macro it) ,lisp-name ,function ,@args)
-       `(,function ,@args)))
-
-(defmacro defcfun*(name-and-options return-type &body args)
-
-  (multiple-value-bind (c-name lisp-name new-lisp-name)
-      (if (atom name-and-options)
-	  (values (default-c-name name-and-options) name-and-options (make-function name-and-options))
-	  (let ((c-name (car name-and-options))
-		(lisp-name (car (cdr name-and-options))))
-	    (let ((new-lisp-name (make-function lisp-name)))
-	      (values c-name lisp-name new-lisp-name))))
-    `(progn
-       (defcfun (,c-name ,new-lisp-name) ,(get-c-type return-type)
-	 ,@args)
-       ,(let ((lambda-list (qmap (arg) (get-first-atom arg) args)))
-	     `(defmacro ,lisp-name ,lambda-list
-		`(call-assert ,',return-type ,',lisp-name ,',new-lisp-name ,,@lambda-list))))))
-		  			     
-(defcfun* ("avformat_open_input" avformat-open-input) :ffmpeg-int
-  (ps :pointer)
-  (filename :string)
-  (fmt :pointer)
-  (options :pointer))
-
 (defun test-cffi!()
-  (macroexpand-1
+  (macroexpand
    '(defcfun* ("avformat_open_input" avformat-open-input) :ffmpeg-int
      (ps :pointer)
      (filename :string)
      (fmt :pointer)
      (options :pointer))))
 
-(defun test-assert()
+(defun test-assert!()
   (macroexpand '(call-assert :ffmpeg-int avformat-open-input pp-format-context file-name (null-pointer) (null-pointer))))
 
-(defun test-cffi(&optional (file-name "/mnt/MUSIC-THD/test.hd.mp4x"))
+(defun adder(x y z)
+  (let ((res (+ (* x x) (* y y) (* z z))))
+    (format t "RESULT IS:~a~%" res)
+    -2))
+
+(defun test-assert()
+  (let ((x 3)(y 4))
+    (ffmpeg-assert my-name adder x y 5)))
+
+(defun test-cffi(&optional (file-name "/mnt/MUSIC-THD/test.hd.mp42"))
   (av-register-all)
   (with-foreign-objects ((pp-format-context :pointer))
     (setf (mem-ref pp-format-context :pointer) (null-pointer))
     (avformat-open-input pp-format-context file-name (null-pointer) (null-pointer)))) 
 	 
+(defun lambda-test()
+  (lambda(x &optional (y 2) (z (* y y)))
+    (+ (* x x) (* y y) (* z z)))) 
