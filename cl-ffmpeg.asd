@@ -11,4 +11,5 @@
 	    ((:file "packages")
 	     (:file "cffi-helper" :depends-on ("packages"))
 	     (:file "ring-buffer" :depends-on ("cffi-helper" "packages"))
-	     (:file "ffmpeg" :depends-on ("ring-buffer" "cffi-helper" packages))))))
+	     (:file "ffmpeg-cffi" :depends-on ("cffi-helper" "packages"))
+	     (:file "ffmpeg" :depends-on ("ring-buffer" "ffmpeg-cffi"))))))
