@@ -65,7 +65,7 @@
 	(!size (foreign-byte-size size element-type))
 	(!element-type element-type)
 	(!full-p)
-	(!error-p)
+	(!error)
 	(!eof-p)
 	(!lock (make-lock))
 	(!full-state (make-condition-variable))
@@ -75,14 +75,23 @@
 		 !size
 		 (mod (- !write-ptr !read-ptr) !size))))
       (flet ((get-room-count()
-	       (- !size (get-fill-count))))
-
+	       (- !size (get-fill-count)))
+	     (set-eof ()
+	       (with-lock-held (!lock)
+		 (setf !eof-p t)
+		 (condition-notify !full-state) 
+		 (condition-notify !empty-state)))
+	     (set-error (error)
+	       (with-lock-held (!lock)
+		 (condition-notify !full-state)
+		 (condition-notify !empty-state)
+		 (setf !error error))))
 	(labels ((buffer-write(buffer size)
 		   (unless (> size 0)(return-from buffer-write 0))
 		   (let ((size
 			  (with-lock-held (!lock)
 			    (loop for room = (get-room-count) until (> room 0) do
-				 (when !error-p (error "Encounter buffer error in read process"))
+				 (when !error (error "Encounter following buffer error in read process:~a" !error))
 				 (condition-wait !full-state !lock)
 			       finally (return (min size room))))))		  
 		     (loop for (dest-idx src-idx size) in (memcpy-params !size !write-ptr size)
@@ -100,7 +109,7 @@
 		   (let ((size
 			  (with-lock-held (!lock)       
 			    (loop for fill-count = (get-fill-count) until (> fill-count 0) do
-				 (when !error-p (error "Encountered buffer error in read process"))
+				 (when !error (error "Encountered buffer error in read process"))
 				 (when !eof-p
 				   (error 'ring-buffer-eof :remaining fill-count))
 				 (condition-wait !empty-state !lock)
@@ -150,17 +159,10 @@
 				     (when eof (return-from reader))))))
 			 (/ idx (foreign-byte-size 1 element-type))))))
 
-	    (:set-eof ()
-		      (with-lock-held (!lock)
-			(setf !eof-p t)
-			(condition-notify !full-state) 
-			(condition-notify !empty-state)))
-	    (:set-error ()
-			(with-lock-held (!lock)
-			  (condition-notify !full-state)
-			  (condition-notify !empty-state)
-			  (setf !error-p t)))
+	    (:set-eof () (set-eof))
+	    (:set-error (error) (set-error error))
 	    (:destroy ()
+		      (set-eof)
 		      (release-lock !lock)
 		      (foreign-free !buffer))))))))
 
@@ -195,8 +197,10 @@
 
 (defmacro with-foreign-ring-buffer((buffer size &key (element-type :uint8)) &body body)
   `(let ((,buffer (make-foreign-ring-buffer ,size :element-type ,element-type)))
-     ,@body
-     (funcall ,buffer :destroy)))
+     (unwind-protect
+	  (progn
+	    ,@body)
+       (funcall ,buffer :destroy))))
 
 (defun write-buffer(ring-buffer c-buffer iter num-samples)
   (for-each-range (idx num-samples)

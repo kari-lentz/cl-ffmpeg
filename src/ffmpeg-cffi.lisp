@@ -27,6 +27,10 @@
 
 (use-foreign-library ffmpeg-wrapper)
 
+(defun close-foreign-libraries()
+  (dolist (lib (list 'libavformat 'libavcodec 'libswresample 'ffmpeg-wrapper))
+    (close-foreign-library lib)))
+
 (defparameter *err-buffer-length* 1024)
 
 (define-condition ffmpeg-fault(error)
@@ -337,10 +341,10 @@
 (defcfun av-lockmgr-register :int
   (callback :pointer))
 
-(defstruct (thread-control (:constructor thread-control (lisp-lock foreign-lock-hash-table sequence-num))) lisp-lock foreign-lock-hash-table sequence-num)
+(defstruct (thread-control (:constructor thread-control (lisp-lock foreign-lock-hash-table &optional (sequence-num 0)))) lisp-lock foreign-lock-hash-table sequence-num)
   
 (defparameter *thread-locks* (make-hash-table))
-(defparameter *thread-control* (thread-control (bordeaux-threads:make-lock "FFMPEG-LOCK") *thread-locks* 0))
+(defparameter *thread-control* (thread-control (bordeaux-threads:make-lock "FFMPEG-LOCK") *thread-locks* 1000))
 
 (defmacro with-foreign-lock(thread-control &body body)
   `(with-slots (lisp-lock foreign-lock-hash-table sequence-num) ,thread-control
