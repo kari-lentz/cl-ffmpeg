@@ -372,27 +372,12 @@
 (defstruct (ffmpeg-env (:constructor ffmpeg-env (ring-buffer out-file-path sample-rate num-channels stream-type))) ring-buffer out-file-path sample-rate num-channels stream-type)
  
 (defun write-to-buffer(ring-buffer frame)
-  (format t "WRITING NUM-SAMPLES:~a~%" (avframe-overlay-nb-samples frame))
   (funcall ring-buffer :write (mem-ref (avframe-overlay-data frame) '(:pointer (:struct audio-frame))) (avframe-overlay-nb-samples frame)))
 
 (defun read-from-buffer(ring-buffer frame)
-  (format t "READING NUM-SAMPLES:~a~%" (avframe-overlay-nb-samples frame))
   (let ((ret (funcall ring-buffer :read (mem-ref (avframe-overlay-data frame) '(:pointer (:struct audio-frame))) (avframe-overlay-nb-samples frame))))
     (setf (avframe-overlay-nb-samples frame) ret)))
  
-(defun test-ffmpeg!(&optional (stream-type :avmedia-type-audio))
-  (av-register-all)
-  (let ((frames 0))
-    (with-input-stream (p-format-context-in p-codec-context-in stream-idx "/mnt/MUSIC-THD/test.hd.mp4" stream-type)
-      (with-new-audio-encoder (p-codec-context-out "libmp3lame" :num-channels 2 :bit-rate 128000) 
-	(with-av-frame frame
-	  (in-frame-read-loop p-format-context-in stream-idx packet-in
-	    (with-decoded-frame (p-codec-context-in stream-type frame packet-in)
-	      (with-encoded-packet (p-codec-context-out stream-type packet-out frame)
-		(incf frames)
-		(format t "frame-count:~a~%" frames))))
-	  (format t "frames-count:~a decode-context:~a~%" frames p-codec-context-in))))))
-
 (defun test-ffmpeg-serial(&optional (stream-type :avmedia-type-audio) (sample-rate 44100))
   (let ((output-file-path "/mnt/MUSIC-THD/dummy.wav"))
     (av-register-all)
@@ -425,50 +410,16 @@
       (with-output-sink (p-format-context-out out-file-path)
 	(with-audio-encoder (p-codec-context-out p-format-context-out stream-type :num-channels num-channels :sample-rate sample-rate)
 	  (avformat-write-header p-format-context-out (null-pointer)) 
-	  (format t "ENTERING LOOP:~a:~a:~a:~a~%" *output-buffer-size* sample-rate num-channels p-codec-context-out)
 	  (loop
-	       (with-buffered-frame (frame-out *output-buffer-size* :rate sample-rate :num-channels num-channels)
-		 (format t "GOT BUFFERED-FRAME~a~%" encoded-packets)
-		 (let ((ret (read-from-buffer ring-buffer frame-out)))
-		   (with-encoded-packet (p-codec-context-out stream-type packet-out frame-out)
-		     (av-interleaved-write-frame p-format-context-out packet-out)
-		     (incf encoded-packets)
-		     (format t "encoded packets:~a~%" encoded-packets))
-		   (unless (= ret *output-buffer-size*) (return)))))
-	  (av-write-trailer p-format-context-out))))))
-
-(defun test-output(&optional (out-file-path "/mnt/MUSIC-THD/test.hd.mp4"))
-  (av-register-all)
-  (with-output-sink(fc out-file-path)
-    (format t "FORMAT-CONTEXT:~a~%" fc)))
-
-(defun test-audio-array(&optional (size 2048))
-  (with-foreign-object (samples '(:struct audio-frame) size)
-    (dotimes (idx size)
-      (setf (mem-ref samples :int idx) (mod idx 256)))
-    (let ((cell (mem-ref samples '(:struct audio-frame) 2047)))
-     cell)))
-        
-(defun test-write(&key (out-file-path "/mnt/MUSIC-THD/test.hd.wav") (sample-rate 44100) (num-channels 2) (stream-type :avmedia-type-audio) (written-samples 2048))
-  (av-register-all)
-  (let ((encoded-packets 0))
-    (with-output-sink (p-format-context-out out-file-path)
-      (with-audio-encoder (p-codec-context-out p-format-context-out stream-type :num-channels num-channels :sample-rate sample-rate)
-	(avformat-write-header p-format-context-out (null-pointer)) 
-	(format t "ENTERING LOOP:~a:~a:~a:~a~%" *output-buffer-size* sample-rate num-channels p-codec-context-out)
-	(with-foreign-object (test-data '(:struct audio-frame) written-samples)
-	  (dotimes (idx written-samples)
-	    (setf (mem-ref test-data :int idx) 0))
-	  (format t "HERE!!~%")
-	  (loop while (< encoded-packets 100) do
-	       (with-buffered-frame (frame-out *output-buffer-size* :user-data test-data :rate sample-rate :num-channels num-channels)
-		 (format t "GOT BUFFERED-FRAME:~a NB-SAMPLES:~a~%" encoded-packets (avframe-overlay-nb-samples frame-out))
+	     (with-buffered-frame (frame-out *output-buffer-size* :rate sample-rate :num-channels num-channels)
+	       (let ((ret (read-from-buffer ring-buffer frame-out)))
 		 (with-encoded-packet (p-codec-context-out stream-type packet-out frame-out)
 		   (av-interleaved-write-frame p-format-context-out packet-out)
 		   (incf encoded-packets)
-		   (format t "encoded packets:~a~%" encoded-packets)))))
-	(av-write-trailer p-format-context-out)))))
-
+		   (unless (= ret *output-buffer-size*) (return))))))
+	  (format t "WRITING TRAILER!!!~%")
+	  (av-write-trailer p-format-context-out))))))
+        
 (defun ffmpeg-transcode(in-file-path output-file-path &optional (stream-type :avmedia-type-audio) (sample-rate 44100)(num-channels 2))
   (av-register-all)
   (let ((ret (av-lockmgr-register (callback my-lock-mgr))))
@@ -477,18 +428,18 @@
     (let ((my-ffmpeg-env (ffmpeg-env buffer output-file-path sample-rate num-channels stream-type)))  
       (with-thread ("FFMPEG-READER" 
 		    (*debug-lock-mgr* *thread-control* *output-buffer-size*)
-					;(format t "NOW OR NEVER:~a~%" my-ffmpeg-env))
 		    (block writer
 		      (handler-bind
 			  ((condition (lambda(c) (funcall buffer :set-error c) (return-from writer))))
 			(file-write my-ffmpeg-env))))
-	(with-swr-context-mgr swr-ctx-mgr
-	  (let ((frames 0))
-	    (in-decoded-frame-read-loop (frame-in in-file-path stream-type)
-	      (incf frames)
-	      (with-resampled-frame (frame-out swr-ctx-mgr frame-in sample-rate num-channels)
-		(write-to-buffer buffer frame-out)
-		(format t "decoded frames-count:~a~%" frames)))))))))
+	(unwind-protect
+	     (with-swr-context-mgr swr-ctx-mgr
+	       (let ((frames 0))
+		 (in-decoded-frame-read-loop (frame-in in-file-path stream-type)
+		   (incf frames)
+		   (with-resampled-frame (frame-out swr-ctx-mgr frame-in sample-rate num-channels)
+		     (write-to-buffer buffer frame-out)))))
+	  (funcall buffer :set-eof))))))
 
 (defun test-ffmpeg()
   (ffmpeg-transcode "/mnt/MUSIC-THD/test.hd.mp4" "/mnt/MUSIC-THD/dummy.wav"))
