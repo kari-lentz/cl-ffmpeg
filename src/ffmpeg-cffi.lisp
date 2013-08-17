@@ -289,7 +289,7 @@
   (frame :pointer)
   (channel-layout :int))
 
-(defcfun av-frame-get-buffer :int
+(defcfun* av-frame-get-buffer :ffmpeg-int
   (frame :pointer)
   (align :int))
 

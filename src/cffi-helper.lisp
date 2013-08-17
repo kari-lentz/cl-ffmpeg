@@ -14,11 +14,6 @@
 
   (defparameter *cffi-asserts* (make-hash-table)))
 
-(defmacro !define-cffi-return-types(return-types)
-  `(progn
-     ,@(loop for (type c-type assert-macro) in return-types collecting 
-	    `(setf (gethash ,type *cffi-asserts*) (cffi-return ,type ,c-type (quote ,assert-macro))))))
-
 (defmacro define-cffi-return-types(return-types)
   (loop for (type c-type assert-macro) in return-types do
        (setf (gethash type *cffi-asserts*) (cffi-return type c-type assert-macro))))
