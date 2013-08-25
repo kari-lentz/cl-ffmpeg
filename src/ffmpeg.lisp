@@ -1,50 +1,5 @@
 (in-package :cl-ffmpeg)
 
-(defcstruct* wav-header
-  (chunk-id :int32)
-  (chunk-size :int32)
-  (format :int32)
-  (subchunk-iid :int32)
-  (subchunk-1-size :int32)
-  (audio-format :int16)
-  (num-channels :int16)
-  (sample-rate :int32)
-  (byte-rate :int32)
-  (block-align :int16)
-  (bits-per-sample :int16)
-  (subchunk-2-id :int32)
-  (subchunk-2-size :int32))
-
-(defun fill-wav-header(wav-header num-channels sample-rate file-size)
-  (let ((in-sample-rate sample-rate)(in-num-channels num-channels))
-    (with-foreign-slots 
-	((chunk-id  chunk-size format subchunk-iid subchunk-1-size audio-format num-channels sample-rate byte-rate block-align bits-per-sample subchunk-2-id subchunk-2-size) wav-header (:struct wav-header))
-      (setf chunk-id #x52494646)
-      (setf chunk-size (+ 36 file-size))
-      (setf format #x57415654)
-      (setf subchunk-iid #x666d7420)
-      (setf subchunk-1-size 16)
-      (setf audio-format 1)
-      (setf num-channels in-num-channels)
-      (setf sample-rate in-sample-rate)
-      (setf byte-rate (* 2 num-channels 2))
-      (setf block-align (* in-num-channels))
-      (setf bits-per-sample 16)
-      (setf subchunk-2-id #x64617641)
-      (setf subchunk-2-size file-size))
-    wav-header))
-    
-(defmacro with-wav-header((wav-header file-size &optional (num-channels 2) (sample-rate 44100)) &body body)
-  `(with-foreign-object (,wav-header '(:struct wav-header)) 
-     (fill-wav-header ,wav-header ,num-channels ,sample-rate ,file-size)
-     ,@body))
-
-(defun test-wav-header()
-  (with-wav-header (my-wav-header (* 40 1024 1024))
-    (with-foreign-slots ((chunk-size num-channels) my-wav-header (:struct wav-header))
-      (format t "chunk-size:~a~%" chunk-size)
-      (format t "num-channels:~a~%" num-channels)))) 
-
 (defmacro with-foreign-array-to-lisp((foreign-array foreign-type lisp-array) &body body)
   (with-once-only (foreign-array lisp-array)
     (with-gensyms (length idx)
@@ -162,6 +117,7 @@
     `(with-open-input (,p-format-context ,file-path)
        (avformat-find-stream-info ,p-format-context (null-pointer))
        (with-foreign-object (,pp-codec :pointer)
+	 (setf (mem-ref ,pp-codec :pointer) (null-pointer))
 	 (let ((,stream-idx (av-find-best-stream ,p-format-context (foreign-enum-value 'avmedia-type ,media-type) -1 -1 ,pp-codec 0)))
 	   (let ((,p-codec-context (get-codec-context ,p-format-context ,stream-idx))(,p-codec (mem-ref ,pp-codec :pointer)))
 	     (open-codec-2 ,p-codec-context ,p-codec)
@@ -260,6 +216,7 @@
     (with-gensyms (p-io-context)
       `(with-foreign-object (,p-io-context :pointer)
 	 (ensure-file-gone ,file-path)
+	 (setf (mem-ref ,p-io-context :pointer) (null-pointer))
 	 (avio-open ,p-io-context ,file-path 2)
 	 (setf (format-context-pb ,format-context) (mem-ref ,p-io-context :pointer))
 	 (unwind-protect
@@ -421,31 +378,29 @@
 	  (av-write-trailer p-format-context-out))))))
         
 (defun ffmpeg-transcode(in-file-path output-file-path &optional (stream-type :avmedia-type-audio) (sample-rate 44100)(num-channels 2))
-  (av-register-all)
-  (let ((ret (av-lockmgr-register (callback my-lock-mgr))))
-    (unless (= ret 0) (error 'ffmpeg-fault :code ret :msg "could not register lock manager")))
-  (with-foreign-ring-buffer (buffer *ring-buffer-size* :element-type '(:struct audio-frame))
-    (let ((my-ffmpeg-env (ffmpeg-env buffer output-file-path sample-rate num-channels stream-type)))  
-      (with-thread ("FFMPEG-READER" 
-		    (*debug-lock-mgr* *thread-control* *output-buffer-size*)
-		    (block writer
-		      (handler-bind
-			  ((condition (lambda(c) (funcall buffer :set-error c) (return-from writer))))
-			(file-write my-ffmpeg-env))))
-	(unwind-protect
-	     (with-swr-context-mgr swr-ctx-mgr
-	       (let ((frames 0))
-		 (in-decoded-frame-read-loop (frame-in in-file-path stream-type)
-		   (incf frames)
-		   (with-resampled-frame (frame-out swr-ctx-mgr frame-in sample-rate num-channels)
-		     (write-to-buffer buffer frame-out)))))
-	  (funcall buffer :set-eof))))))
+  (with-ffmpeg ()
+    (with-foreign-ring-buffer (buffer *ring-buffer-size* :element-type '(:struct audio-frame))
+      (let ((my-ffmpeg-env (ffmpeg-env buffer output-file-path sample-rate num-channels stream-type)))  
+	(with-thread ("FFMPEG-READER" 
+		      (*debug-lock-mgr* *thread-control* *output-buffer-size*)
+		      (block writer
+			(handler-bind
+			    ((condition (lambda(c) (funcall buffer :set-error c) (return-from writer))))
+			  (file-write my-ffmpeg-env))))
+	  (unwind-protect
+	       (with-swr-context-mgr swr-ctx-mgr
+		 (let ((frames 0))
+		   (in-decoded-frame-read-loop (frame-in in-file-path stream-type)
+		     (incf frames)
+		     (with-resampled-frame (frame-out swr-ctx-mgr frame-in sample-rate num-channels)
+		       (write-to-buffer buffer frame-out)))))
+	    (funcall buffer :set-eof)))))))
 
 (defun test-ffmpeg()
   (ffmpeg-transcode "/mnt/MUSIC-THD/test.hd.mp4" "/mnt/MUSIC-THD/dummy.wav"))
 
 (defun volume-test()
-  (dotimes (x 20) (progn (test-ffmpeg-serial) (format t "time #~a~%" x))))
+  (dotimes (x 20) (progn (test-ffmpeg) (format t "time #~a~%" x))))
 
 (defun run())
 

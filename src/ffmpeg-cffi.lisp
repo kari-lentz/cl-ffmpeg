@@ -58,15 +58,6 @@
 	    `(defcenum ,enum
 	       (,(to-keyword (.sym enum '-unknown)) -1)))))
 
-(defmacro defcstruct*(name-and-options &body fields)
-  (let ((type (get-first-atom name-and-options)))
-    `(progn
-       (defcstruct ,name-and-options ,@fields)
-       ,@(loop for item in fields collecting 
-	      (let ((slot-name (get-first-atom item)))
-		`(defmacro ,(.sym (get-first-atom name-and-options) '- (get-first-atom item)) (ptr) 
-		   `(foreign-slot-value ,ptr ,''(:struct ,type) ,'',slot-name)))))))
-
 (defcenum AVDuration-Estimation-Method
   :AVFMT-DURATION-FROM-PTS 
   :AVFMT-DURATION-FROM-STREAM
@@ -338,7 +329,7 @@
   :av-lock-release
   :av-lock-destroy)
 
-(defcfun av-lockmgr-register :int
+(defcfun* av-lockmgr-register :ffmpeg-int
   (callback :pointer))
 
 (defstruct (thread-control (:constructor thread-control (lisp-lock foreign-lock-hash-table &optional (sequence-num 0)))) lisp-lock foreign-lock-hash-table sequence-num)
@@ -414,6 +405,17 @@
 				(,name ,type))
 			      (defsetf ,accessor-name ,lisp-set-name))))))))))
 
+(defmacro with-ffmpeg((&optional lock-mgr-callback) &body body)
+  (with-gensyms()
+    (let ((lock-mgr-callback (or lock-mgr-callback `my-lock-mgr))) 
+      `(progn
+	 (av-register-all)
+	 (av-lockmgr-register (callback ,lock-mgr-callback))
+	 (unwind-protect
+	      (progn
+		,@body)	   
+	   (av-lockmgr-register (null-pointer)))))))
+	   
 (define-ffmpeg-wrappers codec-context
   (channel-layout :uint64)
   (channels :int)
