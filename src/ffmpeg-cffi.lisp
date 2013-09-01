@@ -364,12 +364,13 @@
   (with-foreign-lock thread-control
     (remhash  lock-key foreign-lock-hash-table)))
 
-(defparameter *debug-lock-mgr* nil)
+(with-full-eval
+  (defparameter *debug-lock-mgr* nil))
 
 (defcallback my-lock-mgr :int ((arg :pointer)(op av-lock-op))
   (macrolet ((log*(msg seq-num)
-	       `(when *debug-lock-mgr*
-		  (format *standard-output* "LOCK MGR:~a THREAD-CONTROL:~a~%" ,msg ,seq-num))))
+	       (when *debug-lock-mgr*
+		  `(format *standard-output* "LOCK MGR:~a THREAD-CONTROL:~a~%" ,msg ,seq-num))))
     (handler-case
 	(progn
 	  (case op
