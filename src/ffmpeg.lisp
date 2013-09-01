@@ -16,20 +16,6 @@
 	     (setf (mem-aref ,foreign-array ,foreign-type ,idx) (aref ,lisp-array ,idx)))
 	   ,@body))))
   
-(defmacro free-av-double-pointer(ptr &optional (free-function 'avfreep))
-  (with-gensyms (holder)
-    `(with-foreign-object (,holder :pointer)
-       (setf (mem-ref ,holder :pointer) ,ptr)
-       (,free-function ,holder))))
-
-(defmacro with-av-pointer((ptr allocator &optional (free-function 'avfreep)) &body body)
-  `(let ((,ptr ,allocator))
-     (unless (null-pointer-p ,ptr)
-       (unwind-protect
-	    (progn
-	      ,@body)
-	 (free-av-double-pointer ,ptr ,free-function)))))
-
 (defmacro with-av-frame(av-frame &body body)
   (with-gensyms (holder)
     `(let ((,av-frame (av-frame-alloc)))
@@ -167,12 +153,13 @@
 (defmacro with-new-encoder((codec-context codec name) &body body)
   `(let ((,codec (avcodec-find-encoder-by-name ,name)))
      (when (null-pointer-p ,codec) (error 'ffmpeg-fault :msg (% "codec ~a not found" ,name)))
-     (with-av-pointer (,codec-context (avcodec-alloc-context3 ,codec))
+     (let ((,codec-context (avcodec-alloc-context3 ,codec)))
        (when (null-pointer-p ,codec-context) (error 'ffmpeg-fault :msg (% "failed to open codec context:~a" ,name)))
        (unwind-protect
 	    (progn
 	      ,@body)
-	 (avcodec-close ,codec-context)))))
+	 (avcodec-close ,codec-context)
+	 (avfreep ,codec-context))))) 
 
 (defmacro with-new-audio-encoder((codec-context name &key (sample-rate 44100) (num-channels 2) bit-rate) &body body)
   (with-gensyms (codec)
@@ -321,11 +308,6 @@
 	  (setf (avframe-overlay-nb-samples ,frame-out) (swr-convert ,swr-ctx (avframe-overlay-data ,frame-out) ,nb-samples (avframe-overlay-data ,frame-in) (avframe-overlay-nb-samples ,frame-in)))
 	  ,@body)))))
 
-(defparameter *ring-buffer-size* 65536)
-(defparameter *out-file-path* nil)
-(defparameter *sample-rate* nil)
-(defparameter *num-channels* 2)
-
 (defstruct (ffmpeg-env (:constructor ffmpeg-env (ring-buffer out-file-path sample-rate num-channels stream-type))) ring-buffer out-file-path sample-rate num-channels stream-type)
  
 (defun write-to-buffer(ring-buffer frame)
@@ -335,14 +317,14 @@
   (let ((ret (funcall ring-buffer :read (mem-ref (avframe-overlay-data frame) '(:pointer (:struct audio-frame))) (avframe-overlay-nb-samples frame))))
     (setf (avframe-overlay-nb-samples frame) ret)))
  
-(defun test-ffmpeg-serial(&optional (stream-type :avmedia-type-audio) (sample-rate 44100))
+(defun test-ffmpeg-serial(&optional (in-file "/mnt/MUSIC-THD/test.hd.mp4") (stream-type :avmedia-type-audio) (sample-rate 44100))
   (let ((output-file-path "/mnt/MUSIC-THD/dummy.wav"))
     (av-register-all)
     (let ((ret (av-lockmgr-register (callback my-lock-mgr))))
       (unless (= ret 0) (error 'ffmpeg-fault :code ret :msg "could not register lock manager")))
     (with-swr-context-mgr swr-ctx-mgr
       (let ((decoded-frames 0)(encoded-packets 0))
-	(with-input-stream (p-format-context-in p-codec-context-in stream-idx "/mnt/MUSIC-THD/test.hd.mp4" stream-type)
+	(with-input-stream (p-format-context-in p-codec-context-in stream-idx in-file stream-type)
 	  (with-output-sink (p-format-context-out output-file-path)
 	    (with-audio-encoder (p-codec-context-out p-format-context-out stream-type :num-channels 2 :sample-rate sample-rate)
 	      (with-av-frame frame-in
@@ -360,7 +342,7 @@
 		(format t "frames-count:~a: packet-count:~a codec-context-in -> channels:~a sample-rate:~a channel_layout:~a~%" decoded-frames encoded-packets (codec-context-channels p-codec-context-in) (codec-context-sample-rate p-codec-context-in)  (codec-context-channel-layout p-codec-context-in))))))))))
 
 (defparameter *output-buffer-size* 2048)
-
+        
 (defun file-write(ffmpeg-env)
   (let ((encoded-packets 0))
     (with-slots (ring-buffer out-file-path sample-rate num-channels stream-type) ffmpeg-env
@@ -376,10 +358,10 @@
 		   (unless (= ret *output-buffer-size*) (return))))))
 	  (format t "WRITING TRAILER!!!~%")
 	  (av-write-trailer p-format-context-out))))))
-        
-(defun ffmpeg-transcode(in-file-path output-file-path &optional (stream-type :avmedia-type-audio) (sample-rate 44100)(num-channels 2))
+
+(defun ffmpeg-transcode(in-file-path output-file-path &key (stream-type :avmedia-type-audio) (sample-rate 44100)(num-channels 2) (ring-buffer-size 65536))
   (with-ffmpeg ()
-    (with-foreign-ring-buffer (buffer *ring-buffer-size* :element-type '(:struct audio-frame))
+    (with-foreign-ring-buffer (buffer ring-buffer-size :element-type '(:struct audio-frame))
       (let ((my-ffmpeg-env (ffmpeg-env buffer output-file-path sample-rate num-channels stream-type)))  
 	(with-thread ("FFMPEG-READER" 
 		      (*debug-lock-mgr* *thread-control* *output-buffer-size*)
@@ -396,11 +378,14 @@
 		       (write-to-buffer buffer frame-out)))))
 	    (funcall buffer :set-eof)))))))
 
-(defun test-ffmpeg()
-  (ffmpeg-transcode "/mnt/MUSIC-THD/test.hd.mp4" "/mnt/MUSIC-THD/dummy.wav"))
+(defun test-ffmpeg(&optional (pf "/mnt/MUSIC-THD/test.hd.mp4"))
+  (ffmpeg-transcode pf "/mnt/MUSIC-THD/dummy.wav"))
 
-(defun volume-test()
-  (dotimes (x 20) (progn (test-ffmpeg) (format t "time #~a~%" x))))
+(defun volume-test-serial(&optional (freq 20))
+  (dotimes (x freq) (progn (test-ffmpeg-serial) (format t "time #~a~%" x))))
+
+(defun volume-test(&optional (freq 20))
+  (dotimes (x freq) (progn (test-ffmpeg) (format t "time #~a~%" x))))
 
 (defun run())
 
@@ -441,3 +426,10 @@
 
 (defun save-image()
   (sb-ext:save-lisp-and-die "/home/klentz/ffmpeg-server" :executable t))
+
+(defun test-multiple()
+  (loop for pf in (directory "/home/klentz/test/video/*.mp4") do
+       (let ((pf (namestring pf)))
+	 (format t "processing ~a" pf)
+	 (test-ffmpeg pf) 
+	 (format t "processed ~a" pf))))

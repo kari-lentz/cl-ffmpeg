@@ -1,7 +1,13 @@
 (in-package :cffi-helper)
 
-;; (define-cffi-return-types
-;;     ((:ffmpeg-int :int ffmpeg-assert)))
+(defmacro defcstruct*(name-and-options &body fields)
+  (let ((type (get-first-atom name-and-options)))
+    `(progn
+       (defcstruct ,name-and-options ,@fields)
+       ,@(loop for item in fields collecting 
+	      (let ((slot-name (get-first-atom item)))
+		`(defmacro ,(.sym (get-first-atom name-and-options) '- (get-first-atom item)) (ptr) 
+		   `(foreign-slot-value ,ptr ,''(:struct ,type) ,'',slot-name)))))))
 
 (with-full-eval
   (defun default-c-name(lisp-name)
