@@ -344,21 +344,21 @@
   
 (defun create-lock(thread-control)
   (with-foreign-lock thread-control
-    (setf (gethash sequence-num foreign-lock-hash-table) (bordeaux-threads:make-lock))
+    (setf (gethash sequence-num foreign-lock-hash-table) (bordeaux-threads:make-recursive-lock))
     (post-fix sequence-num
 	      (incf sequence-num))))
 
-(defun acquire-lock(thread-control lock-key)
+(defun get-lock-id(thread-control lock-key)
   (with-foreign-lock thread-control
     (aif (gethash lock-key foreign-lock-hash-table)
-	 (bordeaux-threads:acquire-lock it)
+	 it
 	 (error (% "ffmpeg acquire: lock not found for sequence~a" sequence-num)))))
+  
+(defun acquire-lock(thread-control lock-key)
+  (bordeaux-threads:acquire-lock (get-lock-id thread-control lock-key)))
 
 (defun release-lock(thread-control lock-key)
-  (with-foreign-lock thread-control
-    (aif (gethash lock-key foreign-lock-hash-table)
-	 (bordeaux-threads:release-lock it)
-	 (error (% "ffmpeg release lock not found for sequence~a" sequence-num)))))
+  (bordeaux-threads:release-lock (get-lock-id thread-control lock-key)))
 
 (defun destroy-lock(thread-control lock-key)
   (with-foreign-lock thread-control
@@ -367,24 +367,27 @@
 (defparameter *debug-lock-mgr* nil)
 
 (defcallback my-lock-mgr :int ((arg :pointer)(op av-lock-op))
-  (macrolet ((log*(msg)
+  (macrolet ((log*(msg seq-num)
 	       `(when *debug-lock-mgr*
-		  (format *standard-output* "LOCK MGR:~a THREAD-CONTROL:~a~%" ,msg *thread-control*))))
+		  (format *standard-output* "LOCK MGR:~a THREAD-CONTROL:~a~%" ,msg ,seq-num))))
     (handler-case
 	(progn
 	  (case op
 	    (:av-lock-create
-	     (log* "create")
-	     (setf (mem-ref arg :int) (create-lock *thread-control*)))
+	     (setf (mem-ref arg :int) (create-lock *thread-control*))
+	     (log* "create done" (mem-ref arg :int)))
 	    (:av-lock-obtain
-	     (log* "obtain")
-	     (acquire-lock *thread-control* (mem-ref arg :int)))
+	     (log* "obtain start" (mem-ref arg :int))
+	     (acquire-lock *thread-control* (mem-ref arg :int))
+	     (log* "obtain done" (mem-ref arg :int)))
 	    (:av-lock-release
-	     (log* "release")
-	     (release-lock *thread-control* (mem-ref arg :int)))
+	     (log* "release start" (mem-ref arg :int))
+	     (release-lock *thread-control* (mem-ref arg :int))
+	     (log* "release done" (mem-ref arg :int)))
 	    (:av-lock-destroy
-	     (log* "destroy")
-	     (destroy-lock *thread-control* (mem-ref arg :int))))
+	     (log* "destroy start" (mem-ref arg :int))
+	     (destroy-lock *thread-control* (mem-ref arg :int))
+	     (log* "destroy done" (mem-ref arg :int))))
 	  0)
       (error()))))
 
@@ -415,7 +418,7 @@
 	      (progn
 		,@body)	   
 	   (av-lockmgr-register (null-pointer)))))))
-	   
+ 
 (define-ffmpeg-wrappers codec-context
   (channel-layout :uint64)
   (channels :int)
