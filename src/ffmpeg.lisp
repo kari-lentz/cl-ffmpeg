@@ -308,7 +308,13 @@
 	  (setf (avframe-overlay-nb-samples ,frame-out) (swr-convert ,swr-ctx (avframe-overlay-data ,frame-out) ,nb-samples (avframe-overlay-data ,frame-in) (avframe-overlay-nb-samples ,frame-in)))
 	  ,@body)))))
 
-(defstruct (ffmpeg-env (:constructor ffmpeg-env (ring-buffer out-file-path sample-rate num-channels stream-type))) ring-buffer out-file-path sample-rate num-channels stream-type)
+(defstruct (ffmpeg-env (:constructor ffmpeg-env (ring-buffer in-device out-device))) ring-buffer (output-buffer-size 16384) in-device out-device media-type)
+
+(defstruct 
+    (audio-params 
+      (:constructor audio-params (&key (media-type :avmedia-type-audio) (sample-rate 44100)(num-channels 2) ring-buffer output-buffer-size)) 
+      (:include ffmpeg-env))  
+  sample-rate num-channels)
  
 (defun write-to-buffer(ring-buffer frame)
   (funcall ring-buffer :write (mem-ref (avframe-overlay-data frame) '(:pointer (:struct audio-frame))) (avframe-overlay-nb-samples frame)))
@@ -316,73 +322,56 @@
 (defun read-from-buffer(ring-buffer frame)
   (let ((ret (funcall ring-buffer :read (mem-ref (avframe-overlay-data frame) '(:pointer (:struct audio-frame))) (avframe-overlay-nb-samples frame))))
     (setf (avframe-overlay-nb-samples frame) ret)))
- 
-(defun test-ffmpeg-serial(&optional (in-file "/mnt/MUSIC-THD/test.hd.mp4") (stream-type :avmedia-type-audio) (sample-rate 44100))
-  (let ((output-file-path "/mnt/MUSIC-THD/dummy.wav"))
-    (av-register-all)
-    (let ((ret (av-lockmgr-register (callback my-lock-mgr))))
-      (unless (= ret 0) (error 'ffmpeg-fault :code ret :msg "could not register lock manager")))
-    (with-swr-context-mgr swr-ctx-mgr
-      (let ((decoded-frames 0)(encoded-packets 0))
-	(with-input-stream (p-format-context-in p-codec-context-in stream-idx in-file stream-type)
-	  (with-output-sink (p-format-context-out output-file-path)
-	    (with-audio-encoder (p-codec-context-out p-format-context-out stream-type :num-channels 2 :sample-rate sample-rate)
-	      (with-av-frame frame-in
-		(avformat-write-header p-format-context-out (null-pointer)) 
-
-		(in-frame-read-loop p-format-context-in stream-idx packet-in
-		  (with-decoded-frame (p-codec-context-in stream-type frame-in packet-in)
-		    (incf decoded-frames)
-		    (with-resampled-frame (frame-out swr-ctx-mgr frame-in sample-rate) 
-		      (with-encoded-packet (p-codec-context-out stream-type packet-out frame-out)
-			(incf encoded-packets)
-					;(format t "at frame:~a~%" encoded-packets) 
-			(av-interleaved-write-frame p-format-context-out packet-out)))))
-		(av-write-trailer p-format-context-out) 
-		(format t "frames-count:~a: packet-count:~a codec-context-in -> channels:~a sample-rate:~a channel_layout:~a~%" decoded-frames encoded-packets (codec-context-channels p-codec-context-in) (codec-context-sample-rate p-codec-context-in)  (codec-context-channel-layout p-codec-context-in))))))))))
-
-(defparameter *output-buffer-size* 2048)
         
-(defun file-write(ffmpeg-env)
+(defgeneric run-ffmpeg-in(audio-params in-device)) 
+(defgeneric run-ffmpeg-out(audio-params out-device)) 
+
+(defmethod run-ffmpeg-in((audio-params audio-params) (in-device pathname))
+  (with-slots (sample-rate num-channels (stream-type media-type) (buffer ring-buffer)) audio-params
+    (with-swr-context-mgr swr-ctx-mgr
+      (let ((frames 0))
+	(in-decoded-frame-read-loop (frame-in (namestring in-device) stream-type)
+	  (incf frames)
+	  (with-resampled-frame (frame-out swr-ctx-mgr frame-in sample-rate num-channels)
+	    (write-to-buffer buffer frame-out)))))))
+
+(defmethod run-ffmpeg-out((audio-params audio-params) (out-device pathname))
   (let ((encoded-packets 0))
-    (with-slots (ring-buffer out-file-path sample-rate num-channels stream-type) ffmpeg-env
-      (with-output-sink (p-format-context-out out-file-path)
+    (with-slots (ring-buffer sample-rate num-channels (stream-type media-type) output-buffer-size) audio-params
+      (with-output-sink (p-format-context-out (namestring out-device))
 	(with-audio-encoder (p-codec-context-out p-format-context-out stream-type :num-channels num-channels :sample-rate sample-rate)
 	  (avformat-write-header p-format-context-out (null-pointer)) 
 	  (loop
-	     (with-buffered-frame (frame-out *output-buffer-size* :rate sample-rate :num-channels num-channels)
+	     (with-buffered-frame (frame-out output-buffer-size :rate sample-rate :num-channels num-channels)
 	       (let ((ret (read-from-buffer ring-buffer frame-out)))
 		 (with-encoded-packet (p-codec-context-out stream-type packet-out frame-out)
 		   (av-interleaved-write-frame p-format-context-out packet-out)
 		   (incf encoded-packets)
-		   (unless (= ret *output-buffer-size*) (return))))))
+		   (unless (= ret output-buffer-size) (return))))))
 	  (format t "WRITING TRAILER!!!~%")
 	  (av-write-trailer p-format-context-out))))))
 
-(defun ffmpeg-transcode(in-file-path output-file-path &key (stream-type :avmedia-type-audio) (sample-rate 44100)(num-channels 2) (ring-buffer-size 65536))
-  (with-ffmpeg ()
-    (with-foreign-ring-buffer (buffer ring-buffer-size :element-type '(:struct audio-frame))
-      (let ((my-ffmpeg-env (ffmpeg-env buffer output-file-path sample-rate num-channels stream-type)))  
+(defun run-ffmpeg(ffmpeg-env in-device out-device &key (ring-buffer-size 65536))
+  (with-slots (ring-buffer) ffmpeg-env
+    (with-ffmpeg ()
+      (with-foreign-ring-buffer (buffer ring-buffer-size :element-type '(:struct audio-frame))
+	(setf ring-buffer buffer)  
 	(with-thread ("FFMPEG-READER" 
-		      (*debug-lock-mgr* *thread-control* *output-buffer-size*)
+		      (*debug-lock-mgr* *thread-control*)
 		      (block writer
 			(handler-bind
 			    ((condition (lambda(c) (funcall buffer :set-error c) (return-from writer))))
-			  (file-write my-ffmpeg-env))))
+			  (run-ffmpeg-out ffmpeg-env out-device))))
 	  (unwind-protect
-	       (with-swr-context-mgr swr-ctx-mgr
-		 (let ((frames 0))
-		   (in-decoded-frame-read-loop (frame-in in-file-path stream-type)
-		     (incf frames)
-		     (with-resampled-frame (frame-out swr-ctx-mgr frame-in sample-rate num-channels)
-		       (write-to-buffer buffer frame-out)))))
+	       (run-ffmpeg-in ffmpeg-env in-device)
 	    (funcall buffer :set-eof)))))))
 
-(defun test-ffmpeg(&optional (pf "/mnt/MUSIC-THD/test.hd.mp4"))
-  (ffmpeg-transcode pf "/mnt/MUSIC-THD/dummy.wav"))
+(defun ffmpeg-transcode(ffmpeg-env in-file-path output-file-path)
+  (with-ffmpeg ()
+    (run-ffmpeg ffmpeg-env (pathname in-file-path) (pathname output-file-path)))) 
 
-(defun volume-test-serial(&optional (freq 20))
-  (dotimes (x freq) (progn (test-ffmpeg-serial) (format t "time #~a~%" x))))
+(defun test-ffmpeg(&optional (pf "/mnt/MUSIC-THD/test.hd.mp4"))
+  (ffmpeg-transcode (audio-params) pf "/mnt/MUSIC-THD/dummy.wav"))
 
 (defun volume-test(&optional (freq 20))
   (dotimes (x freq) (progn (test-ffmpeg) (format t "time #~a~%" x))))
@@ -433,3 +422,5 @@
 	 (format t "processing ~a" pf)
 	 (test-ffmpeg pf) 
 	 (format t "processed ~a" pf))))
+
+  
