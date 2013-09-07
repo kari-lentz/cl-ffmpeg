@@ -351,13 +351,17 @@
 	  (format t "WRITING TRAILER!!!~%")
 	  (av-write-trailer p-format-context-out))))))
 
+(defmacro with-audio-buffer((buffer &key (ring-buffer-size 65536)) &body body)
+  `(with-foreign-ring-buffer (,buffer ,ring-buffer-size :element-type '(:struct audio-frame))
+     ,@body))
+
 (defun run-ffmpeg(ffmpeg-env in-device out-device &key (ring-buffer-size 65536))
   (with-slots (ring-buffer) ffmpeg-env
     (with-ffmpeg ()
-      (with-foreign-ring-buffer (buffer ring-buffer-size :element-type '(:struct audio-frame))
+      (with-audio-buffer (buffer :ring-buffer-size ring-buffer-size)
 	(setf ring-buffer buffer)  
 	(with-thread ("FFMPEG-READER" 
-		      (*debug-lock-mgr* *thread-control*)
+		      ()
 		      (block writer
 			(handler-bind
 			    ((condition (lambda(c) (funcall buffer :set-error c) (return-from writer))))
