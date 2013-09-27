@@ -1,7 +1,7 @@
 (defpackage :cffi-helper
   (:documentation "front end for cl-ffmpeg")
   (:use :cl :cffi :my-env :utility)
-  (:export :define-cffi-return-types :defcstruct* :defcfun*))
+  (:export :define-cffi-return-types :defcstruct* :defcfun* :zero-memory))
 
 (defpackage :ring-buffer
   (:documentation "front end for cl-ffmpeg")
@@ -20,6 +20,6 @@
 
 (defpackage :cl-sdl-audio
   (:documentation "basic audio using the sdl mixer library (not available in lispbuilder)")
-  (:use :cl :cffi :bordeaux-threads :my-env :my-db :utility :ring-buffer :cffi-helper :cl-ffmpeg-inherit :cl-ffmpeg)
+  (:use :cl :cffi :bordeaux-threads :lispbuilder-sdl :my-env :my-db :utility :ring-buffer :cffi-helper :cl-ffmpeg-inherit :cl-ffmpeg)
   (:export))
 

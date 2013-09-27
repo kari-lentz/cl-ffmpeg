@@ -86,7 +86,7 @@
        it
        (error "SDL AUDIO SEQUENCE NUMBER ~a NOT FOUND~%" seq-num)))
        
-(defcallback sdl-audio-player :void
+(defcallback !sdl-audio-player :void
     ((user-data :pointer)
      (stream :pointer)
      (len :int))
@@ -102,6 +102,64 @@
 		(with-lock-held (wait-lock)
 		  (condition-notify done-waiter))))))))))
 
+(defcallback sdl-audio-player :void
+    ((user-data :pointer)
+     (stream :pointer)
+     (len :int))
+  (declare (ignore user-data))
+  (declare (ignore stream))  
+  (block audio-block
+    (handler-bind
+	((condition (lambda(c) (format t "TRAPPED ERROR:~a~%" c) (return-from audio-block))))
+      (format t "CALLBACK REQUEST FOR ~a audio bytes~%" len))))
+
+(defun make-thread (function &key name arguments ephemeral)
+  #+sb-doc
+  "Create a new thread of NAME that runs FUNCTION with the argument
+list designator provided (defaults to no argument). Thread exits when
+the function returns. The return values of FUNCTION are kept around
+and can be retrieved by JOIN-THREAD.
+
+Invoking the initial ABORT restart estabilished by MAKE-THREAD
+terminates the thread.
+
+See also: RETURN-FROM-THREAD, ABORT-THREAD."
+  #-sb-thread (declare (ignore function name arguments ephemeral))
+  #-sb-thread (error "Not supported in unithread builds.")
+  #+sb-thread (assert (or (atom arguments)
+                           (null (cdr (last arguments))))
+                       (arguments)
+                       "Argument passed to ~S, ~S, is an improper list."
+                       'make-thread arguments)
+  #+sb-thread
+  (let ((thread (sb-thread::%make-thread :name name :%ephemeral-p ephemeral)))
+     (sb-thread:with-mutex (sb-thread::*make-thread-lock*)
+       (let* ((setup-sem (sb-thread:make-semaphore :name "Thread setup semaphore"))
+              (real-function (coerce function 'function))
+              (arguments     (if (listp arguments)
+                                 arguments
+                                 (list arguments)))
+              (initial-function
+               (sb-ext::named-lambda initial-thread-function ()
+                 ;; As it is, this lambda must not cons until we are ready
+                 ;; to run GC. Be very careful.
+                 (sb-thread::initial-thread-function-trampoline
+                  thread setup-sem real-function arguments nil nil nil))))
+         ;; If the starting thread is stopped for gc before it signals the
+         ;; semaphore then we'd be stuck.
+         (assert (not sb-thread::*gc-inhibit*))
+         ;; Keep INITIAL-FUNCTION pinned until the child thread is
+         ;; initialized properly. Wrap the whole thing in
+         ;; WITHOUT-INTERRUPTS because we pass INITIAL-FUNCTION to another
+         ;; thread.
+         (sb-sys:without-interrupts
+           (sb-sys:with-pinned-objects (initial-function)
+             (if (zerop
+                  (sb-thread::%create-thread (sb-thread::get-lisp-obj-address initial-function)))
+                 (setf thread nil)
+                 (sb-thread:wait-on-semaphore setup-sem))))))
+     (or thread (error "Could not create a new thread."))))
+
 (defmethod run-ffmpeg-out(audio-params (device-out sdl-audio-device))
   (sdl:with-init (sdl:sdl-init-video sdl:sdl-init-audio)
     (with-slots (sample-rate num-channels output-buffer-size) audio-params
@@ -109,7 +167,7 @@
 	(with-foreign-slots ((freq format channels samples callback userdata) audio-spec (:struct sdl-audio-spec))
 	  
 	  (format t "HOLY COW!!:~a~%" sample-rate)
-
+	  (zero-memory audio-spec '(:struct sdl-audio-spec)) 
 	  (setf freq sample-rate)
 	  (setf format (foreign-enum-value 'sdl-audio-formats :audio-s16))
 	  (setf channels num-channels)
@@ -117,8 +175,10 @@
 	  (setf callback (callback sdl-audio-player))
 	  (setf (mem-ref seq-num :int) (register-sdl-audio-device device-out))
 	  (setf userdata seq-num)
-	
+
 	  (sdl-open-audio audio-spec (null-pointer))
+       
+	  ;(sdl-open-audio audio-spec (null-pointer))
 	  (unwind-protect 
 	       (progn
 		 (sdl-pause-audio 0)
