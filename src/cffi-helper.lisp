@@ -56,3 +56,10 @@
 		`(call-assert ,',return-type ,',lisp-name ,',new-lisp-name ,,@lambda-list))))))
 		  			     
 	 
+(defcfun memset :pointer
+  (ptr :pointer)
+  (value :int)
+  (size :uint))
+
+(defun zero-memory(cffi-pointer cffi-type)
+  (memset cffi-pointer 0 (foreign-type-size cffi-type)))
