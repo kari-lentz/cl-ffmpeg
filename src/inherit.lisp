@@ -17,12 +17,12 @@
 
 (defstruct* (ffmpeg-env (:constructor ffmpeg-env (ring-buffer in-device out-device)))
     (:export-p t)
-    ring-buffer (output-buffer-size 16384) in-device out-device media-type)
+    ring-buffer (output-buffer-size 16384) in-device out-device (media-type :avmedia-type-audio))
 
 (defstruct* 
     (audio-params 
      (:constructor audio-params (&key (media-type :avmedia-type-audio) (sample-rate 44100)(num-channels 2) ring-buffer output-buffer-size))
      (:include ffmpeg-env))
-    sample-rate num-channels)
+    (sample-rate 44100) (num-channels 2))
 
 
