@@ -18,7 +18,7 @@
   (:use :cl :cffi :my-env :my-db :utility :ring-buffer :cffi-helper :cl-ffmpeg-inherit)
   (:export :run-ffmpeg :run-ffmpeg-in :run-ffmpeg-out :with-audio-buffer :with-ffmpeg :run))
 
-(defpackage :cl-sdl-audio
+(defpackage :cl-alsa
   (:documentation "basic audio using the sdl mixer library (not available in lispbuilder)")
   (:use :cl :cffi :bordeaux-threads :lispbuilder-sdl :my-env :my-db :utility :ring-buffer :cffi-helper :cl-ffmpeg-inherit :cl-ffmpeg)
   (:export))
