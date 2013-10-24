@@ -194,8 +194,8 @@
 		,@body)
 	   (snd-pcm-close ,pcm))))))
 
-(defstruct* (alsa-device (:constructor alsa-device (&key (access :SND-PCM-ACCESS-RW-INTERLEAVED) (format :SND-PCM-FORMAT-S16-LE)(buffer-size 4096)(num-periods 4)(timeout 2000))) (:include audio-params)) 
-    access format buffer-size num-periods timeout)
+(defstruct* (alsa-device (:constructor alsa-device (&key (device-name "hw:0,0") (access :SND-PCM-ACCESS-RW-INTERLEAVED) (format :SND-PCM-FORMAT-S16-LE)(buffer-size 4096)(num-periods 4)(timeout 2000)))) 
+    device-name access format buffer-size num-periods timeout)
 
 (defeasycondition alsa-buffer-fault (alsa-fault)
     (actual-buffer-size requested-buffer-size)
@@ -213,42 +213,43 @@
 (defun get-period-size(buffer-size num-periods)
   (/ buffer-size num-periods))
 
-(defun set-params-hw(pcm hw-params alsa-device)
+(defun set-params-hw(pcm hw-params audio-params alsa-device)
   (macrolet ((hw-set(param &rest values)
 	       `(,(.sym 'snd-pcm-hw-params-set- param) pcm hw-params ,@values)))
-    (with-slots (access format sample-rate num-channels buffer-size num-periods) alsa-device
-      (hw-set access access)
-      (hw-set format format)
-      (hw-set rate sample-rate 0)
-      (hw-set channels num-channels)
-      (tagbody try-buffer
-	 (with-foreign-object (pbuffer-size 'snd-pcm-uframes-t)
-	   (setf (mem-ref pbuffer-size 'snd-pcm-uframes-t) buffer-size)
-	   (restart-case
-	       (progn
-		(hw-set buffer-size-near pbuffer-size)
-		(let ((actual-buffer-size (mem-ref pbuffer-size 'snd-pcm-uframes-t)))
-		  (unless (= actual-buffer-size buffer-size)
-		    (error 'alsa-buffer-fault :requested-buffer-size buffer-size :actual-buffer-size actual-buffer-size))))
+    (with-slots (sample-rate num-channels) audio-params
+      (with-slots (access format buffer-size num-periods) alsa-device
+	(hw-set access access)
+	(hw-set format format)
+	(hw-set rate sample-rate 0)
+	(hw-set channels num-channels)
+	(tagbody try-buffer
+	   (with-foreign-object (pbuffer-size 'snd-pcm-uframes-t)
+	     (setf (mem-ref pbuffer-size 'snd-pcm-uframes-t) buffer-size)
+	     (restart-case
+		 (progn
+		   (hw-set buffer-size-near pbuffer-size)
+		   (let ((actual-buffer-size (mem-ref pbuffer-size 'snd-pcm-uframes-t)))
+		     (unless (= actual-buffer-size buffer-size)
+		       (error 'alsa-buffer-fault :requested-buffer-size buffer-size :actual-buffer-size actual-buffer-size))))
 	       (accept())
 	       (try-new-size(new-buffer-size)
 		 (setf buffer-size new-buffer-size)
 		 (go try-buffer)))))
-      (tagbody try-num-periods
-	 (let ((period-size (get-period-size buffer-size num-periods)))
-	   (with-foreign-object (pperiod-size 'snd-pcm-uframes-t)
-	     (setf (mem-ref pperiod-size 'snd-pcm-uframes-t) period-size)
-	     (restart-case
-		 (progn
-		   (hw-set period-size-near pperiod-size (null-pointer))
-		   (let ((actual-period-size (mem-ref pperiod-size 'snd-pcm-uframes-t)))
-		     (unless (= actual-period-size period-size)
-		       (error 'alsa-period-fault :requested-period-size period-size :actual-period-size actual-period-size))))
-	       (accept())
-	       (try-new-num-periods-num (new-num-periods)
-		 (setf num-periods new-num-periods)
-		 (go try-num-periods))))))
-      (snd-pcm-hw-params pcm hw-params))))
+	(tagbody try-num-periods
+	   (let ((period-size (get-period-size buffer-size num-periods)))
+	     (with-foreign-object (pperiod-size 'snd-pcm-uframes-t)
+	       (setf (mem-ref pperiod-size 'snd-pcm-uframes-t) period-size)
+	       (restart-case
+		   (progn
+		     (hw-set period-size-near pperiod-size (null-pointer))
+		     (let ((actual-period-size (mem-ref pperiod-size 'snd-pcm-uframes-t)))
+		       (unless (= actual-period-size period-size)
+			 (error 'alsa-period-fault :requested-period-size period-size :actual-period-size actual-period-size))))
+		 (accept())
+		 (try-new-num-periods-num (new-num-periods)
+		   (setf num-periods new-num-periods)
+		   (go try-num-periods))))))
+	(snd-pcm-hw-params pcm hw-params)))))
 
 (defun set-params-sw(pcm sw-params alsa-device)
   (macrolet ((sw-set(param &rest values)
@@ -281,27 +282,41 @@
 		,@body)
 	   (snd-pcm-sw-params-free ,sw-params))))))
 
-(defun run(pcm alsa-device)
+(defun run-alsa(pcm audio-params alsa-device)
   (snd-pcm-prepare pcm)
-  (with-slots (timeout ring-buffer buffer-size frames-per-period) alsa-device
-    (with-foreign-object (buffer 'snd-pcm-sframes-t buffer-size)
-      (block play-track
-	(loop
-	   (when (= (snd-pcm-wait pcm timeout) 0)
-	     (warn 'alsa-warning :msg "snd-pcm-wait timed out"))
-	   (let ((max-frames (snd-pcm-avail-update pcm)))
-	     (loop with total-frames = 0 while (< total-frames max-frames) do
-		  (let ((ret (funcall ring-buffer :read buffer total-frames)))
-		    (loop with playing-frames = 0 while (< playing-frames ret) do
-			 (incf playing-frames (snd-pcm-writei pcm buffer ret)))
-		    (unless (= ret max-frames) (return-from play-track)) 
-		    (incf total-frames ret)))))))))
-  
-(defun test-alsa(&key (device-name "default"))
+  (with-slots (ring-buffer) audio-params
+    (with-slots (timeout buffer-size frames-per-period) alsa-device
+      (with-foreign-object (buffer 'snd-pcm-sframes-t buffer-size)
+	(block play-track
+	  (loop
+	     (when (= (snd-pcm-wait pcm timeout) 0)
+	       (warn 'alsa-warning :msg "snd-pcm-wait timed out"))
+	     (let ((max-frames (snd-pcm-avail-update pcm)))
+	       (loop with total-frames = 0 while (< total-frames max-frames) do
+		    (let ((ret (funcall ring-buffer :read buffer total-frames)))
+		      (loop with playing-frames = 0 while (< playing-frames ret) do
+			   (incf playing-frames (snd-pcm-writei pcm buffer ret)))
+		      (unless (= ret max-frames) (return-from play-track)) 
+		      (incf total-frames ret))))))))))
+
+(defmethod run-ffmpeg-out(audio-params (device-out alsa-device))
   (let ((alsa-device (alsa-device)))
-    (with-open-alsa-device (pcm :device-name device-name)
+    (with-open-alsa-device (pcm :device-name (alsa-device-device-name alsa-device))
       (with-hw-params (pcm hw-params)
-	(set-params-hw pcm hw-params alsa-device)
+	(set-params-hw pcm hw-params audio-params alsa-device)
+ 	(with-sw-params (pcm sw-params)
+ 	  (set-params-sw pcm sw-params alsa-device)
+ 	  (run-alsa pcm audio-params alsa-device))))))
+  
+;(defun test-alsa(&optional (file-path "/mnt/MUSIC-THD/test.hd.mp4"))
+ ; (let ((audio-params (audio-params)))
+ ;   (run-ffmpeg audio-params (pathname file-path) (alsa-device))))     
+
+(defun test-alsa()
+  (let ((audio-params (audio-params))(alsa-device (alsa-device)))
+    (with-open-alsa-device (pcm :device-name (alsa-device-device-name alsa-device))
+      (with-hw-params (pcm hw-params)
+	(set-params-hw pcm hw-params audio-params alsa-device)
 	(with-sw-params (pcm sw-params)
 	  (set-params-sw pcm sw-params alsa-device)
 	  (format t "ALSA:~a:~a:~a~%" pcm hw-params sw-params))))))
