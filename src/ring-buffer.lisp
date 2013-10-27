@@ -58,6 +58,8 @@
 (define-condition ring-buffer-eof(error)
   ((remaining :initarg :remaining :reader remaining)))
 
+(define-condition user-eof(condition)())
+
 (defun make-foreign-ring-buffer(size &key (element-type :uint8))
   (let ((!buffer (foreign-alloc element-type :count size))
 	(!read-ptr 0)
@@ -92,6 +94,7 @@
 			  (with-lock-held (!lock)
 			    (loop for room = (get-room-count) until (> room 0) do
 				 (when !error (error "Encounter following buffer error in read process:~a" !error))
+				 (when !eof-p (error 'user-eof))
 				 (condition-wait !full-state !lock)
 			       finally (return (min size room))))))		  
 		     (loop for (dest-idx src-idx size) in (memcpy-params !size !write-ptr size)

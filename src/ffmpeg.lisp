@@ -363,20 +363,49 @@
   `(with-foreign-ring-buffer (,buffer ,ring-buffer-size :element-type '(:struct audio-frame))
      ,@body))
 
+(defmacro with-sdl-window((&key (width 320) (height 240) (event-type :wait)) &body event-body)
+  (with-gensyms (window-block)
+    `(block ,window-block
+       (sdl:with-init (sdl:sdl-init-video)
+	 (sdl:window ,width ,height)
+	 (sdl:with-events (,event-type)
+	   ,@event-body
+	   (:quit-event () (return-from ,window-block)))))))
+
+(defun sdl-blocker(&optional (width 320) (height 240))
+  (with-sdl-window (:width width :height height)
+    (:key-down-event (:key key :mod-key mod-keys)
+		     (when 
+			 (and 
+			  (or (find :sdl-key-mod-lctrl mod-keys) (find :sdl-key-mod-rctrl mod-keys))
+			  (eq key :sdl-key-x))
+		       (sdl:push-quit-event)))))
+
 (defun run-ffmpeg(ffmpeg-env in-device out-device &key (ring-buffer-size 65536))
   (with-slots (ring-buffer) ffmpeg-env
     (with-ffmpeg ()
       (with-audio-buffer (buffer :ring-buffer-size ring-buffer-size)
-	(setf ring-buffer buffer)  
-	(with-thread ("FFMPEG-READER" 
+	(setf ring-buffer buffer)
+	(with-thread ("FFMPEG-WRITER"
 		      ()
-		      (block writer
-			(handler-bind
-			    ((condition (lambda(c) (funcall buffer :set-error c) (return-from writer))))
-			  (run-ffmpeg-out ffmpeg-env out-device))))
-	  (unwind-protect
-	       (run-ffmpeg-in ffmpeg-env in-device)
-	    (funcall buffer :set-eof)))))))
+		      (with-thread ("FFMPEG-READER" 
+				    ()
+				    (block writer
+				      (handler-bind
+					  ((condition (lambda(c) (funcall buffer :set-error c) (return-from writer))))
+					(run-ffmpeg-out ffmpeg-env out-device))))
+			(handler-bind 
+			    ((user-eof (lambda(c) (declare (ignore c)) (invoke-restart 'windup))))
+			  (restart-case
+			      (unwind-protect
+				   (run-ffmpeg-in ffmpeg-env in-device)
+				(funcall buffer :set-eof)
+				(format t "I AM HERE~%")
+				(sdl:push-quit-event))
+			    (windup()
+			      (format t "USER TERMINATION~%"))))))
+	  (sdl-blocker)
+	  (funcall buffer :set-eof))))))
 
 (defun ffmpeg-transcode(ffmpeg-env in-file-path output-file-path)
   (with-ffmpeg ()
@@ -402,9 +431,10 @@
 	   (format ,stream "CLOSING DOWN#1~%")
 	   (format ,stream "CLOSING DOWN#2~%"))))))
 
-(defun kill-writers()
-  (loop for thread in (bordeaux-threads:all-threads) when (~ "FFMPEG-READER" (bordeaux-threads:thread-name thread))
-       do 
+(defun kill-ffmpeg()
+  (loop for thread in (bordeaux-threads:all-threads) 
+     when (~ "FFMPEG-" (bordeaux-threads:thread-name thread))
+     do 
        (format t "~a~%" thread)
        (bordeaux-threads:destroy-thread thread)))
 
