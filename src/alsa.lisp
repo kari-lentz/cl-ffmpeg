@@ -293,7 +293,7 @@
 	       (warn 'alsa-warning :msg "snd-pcm-wait timed out"))
 	     (let ((max-frames (snd-pcm-avail-update pcm)))
 	       (loop with total-frames = 0 while (< total-frames max-frames) do
-		    (let ((ret (funcall ring-buffer :read buffer total-frames)))
+		    (let ((ret (funcall ring-buffer :read buffer max-frames)))
 		      (loop with playing-frames = 0 while (< playing-frames ret) do
 			   (incf playing-frames (snd-pcm-writei pcm buffer ret)))
 		      (unless (= ret max-frames) (return-from play-track)) 
@@ -308,11 +308,11 @@
  	  (set-params-sw pcm sw-params alsa-device)
  	  (run-alsa pcm audio-params alsa-device))))))
   
-;(defun test-alsa(&optional (file-path "/mnt/MUSIC-THD/test.hd.mp4"))
- ; (let ((audio-params (audio-params)))
- ;   (run-ffmpeg audio-params (pathname file-path) (alsa-device))))     
+(defun test-alsa(&optional (file-path "/mnt/MUSIC-THD/test.hd.mp4"))
+ (let ((audio-params (audio-params)))
+   (run-ffmpeg audio-params (pathname file-path) (alsa-device))))     
 
-(defun test-alsa()
+(defun test-alsa-bare()
   (let ((audio-params (audio-params))(alsa-device (alsa-device)))
     (with-open-alsa-device (pcm :device-name (alsa-device-device-name alsa-device))
       (with-hw-params (pcm hw-params)

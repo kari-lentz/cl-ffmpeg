@@ -400,7 +400,6 @@
 			      (unwind-protect
 				   (run-ffmpeg-in ffmpeg-env in-device)
 				(funcall buffer :set-eof)
-				(format t "I AM HERE~%")
 				(sdl:push-quit-event))
 			    (windup()
 			      (format t "USER TERMINATION~%"))))))
