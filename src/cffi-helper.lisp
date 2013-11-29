@@ -15,6 +15,10 @@
   (defun make-function(name)
     (intern (symbol-name (gensym (symbol-name name))))))
 
+(defmacro with-cffi-readers(slots type instance &body body)
+  `(let (,@(loop for (slot-local slot-global) in (ensure-pairs slots) collecting `(,slot-local (,(.sym type '- slot-global) ,instance))))
+     ,@body))
+
 (with-full-eval
   (defstruct (cffi-return (:constructor cffi-return (type c-type assert-macro))) type c-type assert-macro)
 
@@ -63,3 +67,12 @@
 
 (defun zero-memory(cffi-pointer cffi-type)
   (memset cffi-pointer 0 (foreign-type-size cffi-type)))
+
+(defmacro with-cffi-ptrs(specs &body body)
+  `(macrolet(,@(loop for (key type) in specs collecting 
+		    `(,(.sym '* key)(index)
+		      `(mem-ref ,',key ,',type ,index))))
+     (macrolet(,@(loop for (key type) in specs collecting 
+		      `(,(.sym '& key)(index)
+			 `(mem-aptr ,',key ,',type ,index))))
+       ,@body)))
