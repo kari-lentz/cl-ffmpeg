@@ -25,4 +25,9 @@
      (:include ffmpeg-env))
     (sample-rate 44100) (num-channels 2))
 
+(defstruct* 
+    (video-params 
+     (:constructor video-params (&key (media-type :avmedia-type-video) width height ring-buffer (output-buffer-size (* width height 120))))
+     (:include ffmpeg-env))
+    (width 1024) (height 768))
 

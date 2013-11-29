@@ -299,7 +299,12 @@
 	     (setf (mem-ref (avframe-overlay-extended-data ,frame-out) :pointer) ,user-data))
 	   `((av-frame-get-buffer ,frame-out 0)))
      ,@body))
-    
+ 
+;; (defmacro with-buffered-video-frame((frame-out video-params) &body body)
+;;   `(with-slots ((in-width width)(in-height height)) video-params 
+;;      (with-av-frame ,frame-out       
+;;        ,@body
+
 (defmacro with-resampled-frame((frame-out swr-ctx-mgr frame-in &optional (rate 44100) (num-channels 2)) &body body)
   (with-gensyms(nb-samples swr-ctx)
     `(let ((,nb-samples (ceiling  (/ (* ,rate (avframe-overlay-nb-samples ,frame-in)) (av-frame-get-sample-rate ,frame-in)))))
@@ -308,22 +313,13 @@
 	  (setf (avframe-overlay-nb-samples ,frame-out) (swr-convert ,swr-ctx (avframe-overlay-data ,frame-out) ,nb-samples (avframe-overlay-data ,frame-in) (avframe-overlay-nb-samples ,frame-in)))
 	  ,@body)))))
 
-(defmacro !defstruct*(name-and-options (&key export-p) &rest slot-descriptions)
-  (when export-p
-    (let ((name (get-first-atom name-and-options))(slots (mapcar #'get-first-atom slot-descriptions)))
-      (let ((constructor-form (car (remove-if-not (lambda(form) (and (not (atom form))(eq (car form) :constructor))) name-and-options))))
-	(let ((constructor
-	       (if constructor-form
-		   (progn
-		     (unless (>= (length constructor-form) 2) (error "defstruct-exportable ~a has malformed constrcutor form" name-and-options))
-		     (second constructor-form))
-		   (progn
-		     (.sym 'make '- name)))))
-	  (let ((accesors (qmap (slot) (.sym name '- slot) slots)))
-	    (export (make-set (append (list name constructor) slots accesors)))))))  	      
-    `(progn
-       (defstruct ,name-and-options ,@slot-descriptions))))
- 
+(defmacro with-scaled-frame((frame-out sws-context frame-in) &body body) 
+  `(with-cffi-readers ((in-width width) (in-height height) (in-data data) (in-linesize linesize) format) AVFrame-Overlay ,frame-in
+     (with-cffi-readers ((out-width width)(out-height)(out-data data)(out-linesize linesize)) AVFrame-Overlay ,frame-out
+       (let ((,sws-context (sws-get-cached-context in-width in-height format out-width out-height :AV-PIX-FMT-YUV420P 0 (null-pointer) (null-pointer) 0)))
+	 (sws-scale ,sws-context data line-size 0 in-height out-data out-linesize)
+	 ,@body))))
+
 (defun write-to-buffer(ring-buffer frame)
   (funcall ring-buffer :write (mem-ref (avframe-overlay-data frame) '(:pointer (:struct audio-frame))) (avframe-overlay-nb-samples frame)))
 
