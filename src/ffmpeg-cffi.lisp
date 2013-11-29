@@ -21,6 +21,12 @@
 
 (use-foreign-library libswresample)
 
+(define-foreign-library libswscale
+  (:unix (:or "/usr/local/lib/libswscale.so"))
+  (t (:default "libswscale")))
+
+(use-foreign-library libswscale)
+
 (define-foreign-library ffmpeg-wrapper
   (:unix (:or "/usr/local/lib/ffmpeg-wrapper.so"))
   (t (:default "ffmpeg-wrapper")))
@@ -194,7 +200,42 @@
    :AV-SAMPLE-FMT-DBLP 
    :AV-SAMPLE-FMT-NB)
 
-(define-dummy-enums AVCodec-ID AVPixel-Format AVColor-Primaries AVColor-Transfer-Characteristic AVColor-Space AVColor-Range AVChroma-Location AVField-Order AVAudio-Service-Type) 
+(defcenum AVPixel-Format
+     (:AV_PIX_FMT_NONE -1)
+     :AV-PIX-FMT-YUV420P
+     :AV-PIX-FMT-YUYV422
+     :AV-PIX-FMT-RGB24
+     :AV-PIX-FMT-BGR24
+     :AV-PIX-FMT-YUV422P
+     :AV-PIX-FMT-YUV444P
+     :AV-PIX-FMT-YUV410P
+     :AV-PIX-FMT-YUV411P
+     :AV-PIX-FMT-GRAY8
+     :AV-PIX-FMT-MONOWHITE
+     :AV-PIX-FMT-MONOBLACK
+     :AV-PIX-FMT-PAL8
+     :AV-PIX-FMT-YUVJ420P
+     :AV-PIX-FMT-YUVJ422P
+     :AV-PIX-FMT-YUVJ444P
+     :AV-PIX-FMT-XVMC-MPEG2-MC
+     :AV-PIX-FMT-XVMC-MPEG2-IDCT
+     :AV-PIX-FMT-UYVY422
+     :AV-PIX-FMT-UYYVYY411
+     :AV-PIX-FMT-BGR8
+     :AV-PIX-FMT-BGR4
+     :AV-PIX-FMT-BGR4-BYTE
+     :AV-PIX-FMT-RGB8
+     :AV-PIX-FMT-RGB4
+     :AV-PIX-FMT-RGB4-BYTE
+     :AV-PIX-FMT-NV12
+     :AV-PIX-FMT-NV21
+
+     :AV-PIX-FMT-ARGB
+     :AV-PIX-FMT-RGBA
+     :AV-PIX-FMT-ABGR
+     :AV-PIX-FMT-BGRA)
+
+(define-dummy-enums AVCodec-ID AVColor-Primaries AVColor-Transfer-Characteristic AVColor-Space AVColor-Range AVChroma-Location AVField-Order AVAudio-Service-Type) 
 
 (defcfun ("avcodec_find_encoder" avcodec-find-encoder) :pointer
   (id avcodec-id))
@@ -331,6 +372,30 @@
 
 (defcfun* av-lockmgr-register :ffmpeg-int
   (callback :pointer))
+
+(defcfun (sws-get-cached-context "sws_getCachedContext") :pointer
+  (src-w :int)
+  (src-h :int)
+  (src-format AVPixel-Format)
+  (dst-w :int)
+  (dst-h :int)
+  (dst-format AVPixel-Format)
+  (flags :int)
+  (src-filter :int)
+  (dst-filter :int)
+  (param :pointer))
+
+(defcfun (sws-free-context "sws_freeContext") :void
+  (sws-context  :pointer))
+
+(defcfun sws-scale :int
+  (c :pointer)
+  (src-slice :pointer)
+  (src-stride :pointer)
+  (src-slice-y :int)
+  (src-slice-h :int)
+  (dst :pointer)
+  (dst-stride :pointer))
 
 (defstruct (thread-control (:constructor thread-control (lisp-lock foreign-lock-hash-table &optional (sequence-num 0)))) lisp-lock foreign-lock-hash-table sequence-num)
   
@@ -473,3 +538,25 @@
 (defcstruct audio-frame
   (samples :ushort :count 2))
 
+(defcstruct* (av-picture) 
+  (data :pointer :count 8)
+  (linesize :int :count 8))
+
+(defun anchor-picture(av-picture width height buffer)
+  (with-cffi-ptrs ((data :pointer)(linesize :int)(buffer :pointer))
+    (with-foreign-slots ((data linesize) av-picture (:struct av-picture))
+      (setf (*data 0) buffer)
+      (setf (*data 1) (&buffer (* width height)))
+      (setf (*data 2) (&buffer (/ (* 3 width height) 2)))
+      (setf (*linesize 0) width)
+      (setf (*linesize 1) (/ width 2))
+      (setf (*linesize 2) (/ width 2)))))
+
+(defmacro with-alloced-picture((data linesize width height) &body body)
+  (with-gensyms (buffer av-picture)
+    `(with-foreign-object (,buffer :uint8 (* 2 ,width ,height))
+       (with-foreign-object (,av-picture '(:struct av-picture)) 
+	 (anchor-picture ,av-picture ,width ,height ,buffer)
+	 (with-cffi-readers (,data ,linesize) av-picture ,av-picture 
+	   ,@body)))))
+	 
