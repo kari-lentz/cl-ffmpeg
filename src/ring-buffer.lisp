@@ -39,10 +39,10 @@
 	    (!push `(,begin 0 ,delta))
 	    (!push `(0 ,delta ,(- size delta))))))))
 
-(defmacro memcpy-call(dest-buffer dest-idx src-buffer src-idx size)
+(defmacro memcpy-call(type dest-buffer dest-idx src-buffer src-idx size)
   (flet ((foreign-buffer(buffer idx)
-	   `(mem-aptr ,buffer :uint8 ,idx)))
-  `(memcpy ,(foreign-buffer dest-buffer dest-idx) ,(foreign-buffer src-buffer src-idx) ,size)))
+	   `(mem-aptr ,buffer ,type ,idx)))
+  `(memcpy ,(foreign-buffer dest-buffer dest-idx) ,(foreign-buffer src-buffer src-idx) (* (foreign-type-size ,type) ,size)))) 
 
 (defun foreign-byte-size(size element-type)
   (* (foreign-type-size element-type) size))
@@ -60,11 +60,12 @@
 
 (define-condition user-eof(condition)())
 
-(defun make-foreign-ring-buffer(size &key (element-type :uint8))
+(defun make-foreign-ring-buffer(size &key (element-type :uint8) (num-periods 2))
   (let ((!buffer (foreign-alloc element-type :count size))
+	(!period (/ size num-periods))
 	(!read-ptr 0)
 	(!write-ptr 0)
-	(!size (foreign-byte-size size element-type))
+	(!size size)
 	(!element-type element-type)
 	(!full-p)
 	(!error)
@@ -99,7 +100,7 @@
 			       finally (return (min size room))))))		  
 		     (loop for (dest-idx src-idx size) in (memcpy-params !size !write-ptr size)
 			do
-			  (memcpy-call !buffer dest-idx buffer src-idx size))
+			  (memcpy-call !element-type !buffer dest-idx buffer src-idx size))
 		     
 		     (with-lock-held (!lock)
 		       (setf !write-ptr (mod (+ !write-ptr size) !size))
@@ -120,7 +121,7 @@
 				
 		     (loop for (src-idx dest-idx size) in (memcpy-params !size !read-ptr size)
 			do
-			  (memcpy-call buffer dest-idx !buffer src-idx size))
+			  (memcpy-call !element-type buffer dest-idx !buffer src-idx size))
 		     
 		     (with-lock-held (!lock)
 		       (setf !read-ptr (mod (+ !read-ptr size) !size))
@@ -130,16 +131,37 @@
 	       
 	  (dlambda 
 	       
+	    (:write-period(closure)
+			  (let ((closure-params
+				 (with-lock-held (!lock)
+				   (loop for room = (get-room-count) until (>= room !period) do
+					(when !error (error "Encounter following buffer error in read process:~a" !error))
+					(when !eof-p (error 'user-eof))
+					(condition-wait !full-state !lock))
+				   (memcpy-params !size !write-ptr !period))))
+			    		  
+			  (let  ((size
+				  (loop for (idx src-idx size) in closure-params sum
+				       (funcall closure (mem-aptr !buffer !element-type idx) size))))
+
+			    (with-lock-held (!lock)
+			      (setf !write-ptr (mod (+ !write-ptr size) !size))
+			      (when (= !write-ptr !read-ptr)
+				(setf !full-p t))
+			      (condition-notify !empty-state))
+			    size)))
+
+	    
 	    (:write (buffer size)
 		    (block process
 		      (unless (> size 0)(return-from process))
-		      (let ((size (foreign-byte-size size !element-type))(idx 0))
+		      (let ((idx 0))
 			(loop-down (size !size request-size)
 			   (loop with total-bytes = 0 until (>= total-bytes request-size) do
-				(let ((ret (buffer-write (mem-aptr buffer :uint8 idx) (- request-size total-bytes))))
+				(let ((ret (buffer-write (mem-aptr buffer !element-type idx) (- request-size total-bytes))))
 				  (incf idx ret)
 				  (incf total-bytes ret))))
-			(/ idx (foreign-byte-size 1 element-type)))))
+			idx)))
 					      
 	    (:read (buffer size)
 		   (block process
@@ -147,20 +169,20 @@
 		     (handler-bind ((ring-buffer-eof 
 				     (lambda(c)
 				       (invoke-restart 'flush (remaining c)))))
-		       (let ((size (foreign-byte-size size !element-type))(idx 0))
+		       (let ((idx 0))
 			 (block reader
 			   (loop-down (size !size request-size)
 			      (loop with total-bytes = 0 with eof = nil until (>= total-bytes request-size) do
 				   (let ((ret
 					  (restart-case
-					      (buffer-read (mem-aptr buffer :uint8 idx) (- request-size total-bytes))
+					      (buffer-read (mem-aptr buffer !element-type idx) (- request-size total-bytes))
 					    (flush(remaining)
 					      (setf eof t)
-					      (buffer-read (mem-aptr buffer :uint8 idx) remaining)))))
+					      (buffer-read (mem-aptr buffer !element-type idx) remaining)))))
 				     (incf idx ret)
 				     (incf total-bytes ret)
 				     (when eof (return-from reader))))))
-			 (/ idx (foreign-byte-size 1 element-type))))))
+			 idx))))
 
 	    (:set-eof () (set-eof))
 	    (:set-error (error) (set-error error))
@@ -244,3 +266,11 @@
        
 (defun run())
 
+(defun test-array-copy()
+  (let ((buffer (make-array 10 :element-type 'integer)))
+    (for-each-range (n (length buffer))
+      (setf (aref buffer n) (* 10 n)))
+    (let ((buffer-2 (make-array 5 :element-type 'integer :displaced-to buffer :displaced-index-offset 4)))
+      (setf (aref buffer-2 0) 100)
+      (setf (aref buffer-2 1) 101))
+    buffer))
