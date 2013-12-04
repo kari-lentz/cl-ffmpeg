@@ -118,7 +118,7 @@
 				   (error 'ring-buffer-eof :remaining fill-count))
 				 (condition-wait !empty-state !lock)
 			       finally (return (min size fill-count))))))
-				
+		     
 		     (loop for (src-idx dest-idx size) in (memcpy-params !size !read-ptr size)
 			do
 			  (memcpy-call !element-type buffer dest-idx !buffer src-idx size))
@@ -128,9 +128,9 @@
 		       (setf !full-p nil)
 		       (condition-notify !full-state))
 		     size)))
-	       
+	  
 	  (dlambda 
-	       
+	    
 	    (:write-period(closure)
 			  (let ((closure-params
 				 (with-lock-held (!lock)
@@ -139,30 +139,32 @@
 					(when !eof-p (error 'user-eof))
 					(condition-wait !full-state !lock))
 				   (memcpy-params !size !write-ptr !period))))
-			    		  
-			  (let  ((size
-				  (loop for (idx src-idx size) in closure-params sum
-				       (funcall closure (mem-aptr !buffer !element-type idx) size))))
+			    
+			    (with-cffi-ptrs ((!buffer !element-type))
+			      (let  ((size
+				      (loop for (idx src-idx size) in closure-params sum
+					   (funcall closure (&!buffer idx) size))))
 
-			    (with-lock-held (!lock)
-			      (setf !write-ptr (mod (+ !write-ptr size) !size))
-			      (when (= !write-ptr !read-ptr)
-				(setf !full-p t))
-			      (condition-notify !empty-state))
-			    size)))
+			      (with-lock-held (!lock)
+				(setf !write-ptr (mod (+ !write-ptr size) !size))
+				(when (= !write-ptr !read-ptr)
+				  (setf !full-p t))
+				(condition-notify !empty-state))
+			      size))))
 
 	    
 	    (:write (buffer size)
 		    (block process
 		      (unless (> size 0)(return-from process))
 		      (let ((idx 0))
-			(loop-down (size !size request-size)
-			   (loop with total-bytes = 0 until (>= total-bytes request-size) do
-				(let ((ret (buffer-write (mem-aptr buffer !element-type idx) (- request-size total-bytes))))
-				  (incf idx ret)
-				  (incf total-bytes ret))))
-			idx)))
-					      
+			(with-cffi-ptrs ((buffer !element-type))
+			  (loop-down (size !size request-size)
+			     (loop with total-bytes = 0 until (>= total-bytes request-size) do
+				  (let ((ret (buffer-write (&buffer idx) (- request-size total-bytes))))
+				    (incf idx ret)
+				    (incf total-bytes ret)))))
+			  idx)))
+	    
 	    (:read (buffer size)
 		   (block process
 		     (unless (> size 0) (return-from process 0))
@@ -170,18 +172,19 @@
 				     (lambda(c)
 				       (invoke-restart 'flush (remaining c)))))
 		       (let ((idx 0))
-			 (block reader
-			   (loop-down (size !size request-size)
-			      (loop with total-bytes = 0 with eof = nil until (>= total-bytes request-size) do
-				   (let ((ret
-					  (restart-case
-					      (buffer-read (mem-aptr buffer !element-type idx) (- request-size total-bytes))
-					    (flush(remaining)
-					      (setf eof t)
-					      (buffer-read (mem-aptr buffer !element-type idx) remaining)))))
+			 (with-cffi-ptrs ((buffer !element-type))
+			   (block reader
+			     (loop-down (size !size request-size)
+				(loop with total-bytes = 0 with eof = nil until (>= total-bytes request-size) do
+				     (let ((ret
+					    (restart-case
+						(buffer-read (&buffer idx) (- request-size total-bytes))
+					      (flush(remaining)
+						(setf eof t)
+						(buffer-read (&buffer idx) remaining)))))
 				     (incf idx ret)
 				     (incf total-bytes ret)
-				     (when eof (return-from reader))))))
+				     (when eof (return-from reader)))))))
 			 idx))))
 
 	    (:set-eof () (set-eof))
@@ -266,11 +269,3 @@
        
 (defun run())
 
-(defun test-array-copy()
-  (let ((buffer (make-array 10 :element-type 'integer)))
-    (for-each-range (n (length buffer))
-      (setf (aref buffer n) (* 10 n)))
-    (let ((buffer-2 (make-array 5 :element-type 'integer :displaced-to buffer :displaced-index-offset 4)))
-      (setf (aref buffer-2 0) 100)
-      (setf (aref buffer-2 1) 101))
-    buffer))
