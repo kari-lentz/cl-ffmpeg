@@ -55,8 +55,15 @@
 
 (define-condition user-eof(condition)())
 
-(defun make-foreign-ring-buffer(size &key (element-type :uint8) (num-periods 2))
-  (let ((!buffer (foreign-alloc element-type :count size))
+(defmacro define-ring-buffer(name args &rest body)
+  `(macrolet ((?alloc(type &key (count 1))
+	       `(foreign-alloc ,type :count ,count))
+	      (?memcpy(dest src n)
+		`(memcpy ,dest ,src ,n)))
+     (defun ,name ,args ,@body)))
+
+(define-ring-buffer make-foreign-ring-buffer(size &key (element-type :uint8) (num-periods 2))
+  (let ((!buffer (?alloc element-type :count size))
 	(!period (/ size num-periods))
 	(!read-ptr 0)
 	(!write-ptr 0)
@@ -97,7 +104,7 @@
 		       (with-cffi-ptrs ((buffer !element-type))
 			 (loop for (dest-idx src-idx size) in (memcpy-params !size !write-ptr size)
 			    do
-			      (memcpy (&!buffer dest-idx) (&buffer src-idx) (* (foreign-type-size !element-type) size)))) 	     
+			      (?memcpy (&!buffer dest-idx) (&buffer src-idx) (* (foreign-type-size !element-type) size)))) 	     
 		       (with-lock-held (!lock)
 			 (setf !write-ptr (mod (+ !write-ptr size) !size))
 			 (when (= !write-ptr !read-ptr)
@@ -118,7 +125,7 @@
 		       (with-cffi-ptrs ((buffer !element-type))
 			 (loop for (src-idx dest-idx size) in (memcpy-params !size !read-ptr size)
 			    do
-			      (memcpy (&buffer dest-idx) (&!buffer src-idx) (* (foreign-type-size !element-type) size))))
+			      (?memcpy (&buffer dest-idx) (&!buffer src-idx) (* (foreign-type-size !element-type) size))))
 		       
 		       (with-lock-held (!lock)
 			 (setf !read-ptr (mod (+ !read-ptr size) !size))
