@@ -59,7 +59,9 @@
   `(macrolet ((?alloc(type &key (count 1))
 	       `(foreign-alloc ,type :count ,count))
 	      (?memcpy(dest src n)
-		`(memcpy ,dest ,src ,n)))
+		`(memcpy ,dest ,src ,n))
+	      (?free(buffer)
+		`(foreign-free ,buffer)))
      (defun ,name ,args ,@body)))
 
 (define-ring-buffer make-foreign-ring-buffer(size &key (element-type :uint8) (num-periods 2))
@@ -196,7 +198,7 @@
 	      (:destroy ()
 			(set-eof)
 			(release-lock !lock)
-			(foreign-free !buffer)))))))))
+			(?free !buffer)))))))))
 
 (defparameter *thread-id* 0)
 
