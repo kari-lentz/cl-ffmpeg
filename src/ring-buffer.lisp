@@ -67,7 +67,7 @@
 	      (foreign-free !buffer))))))
 
 (defun make-foreign-ring-buffer(size &key (element-type :uint8) (num-periods 2))
-  (let ((type-context (make-cffi-context element-type :count size))
+  (let ((!type-context (make-cffi-context element-type :count size))
 	(!period (/ size num-periods))
 	(!read-ptr 0)
 	(!write-ptr 0)
@@ -106,7 +106,7 @@
 			       finally (return (min size room))))))		  
 		     (loop for (dest-idx src-idx size) in (memcpy-params !size !write-ptr size)
 			do
-			  (funcall type-context :write dest-idx buffer src-idx size)) 	     
+			  (funcall !type-context :write dest-idx buffer src-idx size)) 	     
 		     (with-lock-held (!lock)
 		       (setf !write-ptr (mod (+ !write-ptr size) !size))
 		       (when (= !write-ptr !read-ptr)
@@ -126,7 +126,7 @@
 		     
 		     (loop for (src-idx dest-idx size) in (memcpy-params !size !read-ptr size)
 			do
-			  (funcall type-context :read src-idx buffer dest-idx size))
+			  (funcall !type-context :read src-idx buffer dest-idx size))
 
 		     (with-lock-held (!lock)
 		       (setf !read-ptr (mod (+ !read-ptr size) !size))
@@ -147,7 +147,7 @@
 			    
 			    (let  ((size
 				    (loop for (idx src-idx size) in closure-params sum
-					 (funcall closure type-context size))))
+					 (funcall closure !type-context size))))
 
 			      (with-lock-held (!lock)
 				(setf !write-ptr (mod (+ !write-ptr size) !size))
@@ -195,7 +195,7 @@
 	    (:destroy ()
 		      (set-eof)
 		      (release-lock !lock)
-		      (funcall type-context :free))))))))
+		      (funcall !type-context :free))))))))
 
 (defparameter *thread-id* 0)
 
