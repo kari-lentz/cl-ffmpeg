@@ -55,151 +55,147 @@
 
 (define-condition user-eof(condition)())
 
-(defun make-cffi-context(type)
-  (dlambda
-    (:alloc(&key (count 1))
-	 (foreign-alloc type :count count))
-    (:memcpy(dest src count)
-	  (memcpy dest src (* (foreign-type-size type) count)))
-    (:free(buffer)
-	  (foreign-free buffer))))
+(defun make-cffi-context(type &key (count 1))
+  (with-cffi-ptrs ((!buffer type)(src type))
+    (let ((!buffer (foreign-alloc type :count count)))
+      (dlambda
+	(:write(dest-idx src src-idx count)
+	       (memcpy (&!buffer dest-idx) (&src src-idx) (* (foreign-type-size type) count)))
+	(:read(dest-idx src src-idx count)
+	      (memcpy (&src src-idx) (&!buffer dest-idx) (* (foreign-type-size type) count)))
+	(:free()
+	      (foreign-free !buffer))))))
 
 (defun make-foreign-ring-buffer(size &key (element-type :uint8) (num-periods 2))
-  (let ((type-context (make-cffi-context element-type)))
-    (let ((!buffer (funcall type-context :alloc :count size))
-	  (!period (/ size num-periods))
-	  (!read-ptr 0)
-	  (!write-ptr 0)
-	  (!size size)
-	  (!element-type element-type)
-	  (!full-p)
-	  (!error)
-	  (!eof-p)
-	  (!lock (make-lock))
-	  (!full-state (make-condition-variable))
-	  (!empty-state (make-condition-variable)))
-      (with-cffi-ptrs ((!buffer !element-type)) 
-	(flet ((get-fill-count()
-		 (if !full-p
-		     !size
-		     (mod (- !write-ptr !read-ptr) !size))))
-	  (flet ((get-room-count()
-		   (- !size (get-fill-count)))
-		 (set-eof ()
-		   (with-lock-held (!lock)
-		     (setf !eof-p t)
-		     (condition-notify !full-state) 
-		     (condition-notify !empty-state)))
-		 (set-error (error)
-		   (with-lock-held (!lock)
-		     (condition-notify !full-state)
-		     (condition-notify !empty-state)
-		     (setf !error error))))
-	    (labels ((buffer-write(buffer size)
-		       (unless (> size 0)(return-from buffer-write 0))
-		       (let ((size
+  (let ((type-context (make-cffi-context element-type :count size))
+	(!period (/ size num-periods))
+	(!read-ptr 0)
+	(!write-ptr 0)
+	(!size size)
+	(!element-type element-type)
+	(!full-p)
+	(!error)
+	(!eof-p)
+	(!lock (make-lock))
+	(!full-state (make-condition-variable))
+	(!empty-state (make-condition-variable))) 
+    (flet ((get-fill-count()
+	     (if !full-p
+		 !size
+		 (mod (- !write-ptr !read-ptr) !size))))
+      (flet ((get-room-count()
+	       (- !size (get-fill-count)))
+	     (set-eof ()
+	       (with-lock-held (!lock)
+		 (setf !eof-p t)
+		 (condition-notify !full-state) 
+		 (condition-notify !empty-state)))
+	     (set-error (error)
+	       (with-lock-held (!lock)
+		 (condition-notify !full-state)
+		 (condition-notify !empty-state)
+		 (setf !error error))))
+	(labels ((buffer-write(buffer size)
+		   (unless (> size 0)(return-from buffer-write 0))
+		   (let ((size
+			  (with-lock-held (!lock)
+			    (loop for room = (get-room-count) until (> room 0) do
+				 (when !error (error "Encounter following buffer error in read process:~a" !error))
+				 (when !eof-p (error 'user-eof))
+				 (condition-wait !full-state !lock)
+			       finally (return (min size room))))))		  
+		     (loop for (dest-idx src-idx size) in (memcpy-params !size !write-ptr size)
+			do
+			  (funcall type-context :write dest-idx buffer src-idx size)) 	     
+		     (with-lock-held (!lock)
+		       (setf !write-ptr (mod (+ !write-ptr size) !size))
+		       (when (= !write-ptr !read-ptr)
+			 (setf !full-p t))
+		       (condition-notify !empty-state))
+		     size))
+		 (buffer-read(buffer size)
+		   (unless (> size 0)(return-from buffer-read 0))
+		   (let ((size
+			  (with-lock-held (!lock)       
+			    (loop for fill-count = (get-fill-count) until (> fill-count 0) do
+				 (when !error (error "Encountered buffer error in read process"))
+				 (when !eof-p
+				   (error 'ring-buffer-eof :remaining fill-count))
+				 (condition-wait !empty-state !lock)
+			       finally (return (min size fill-count))))))
+		     
+		     (loop for (src-idx dest-idx size) in (memcpy-params !size !read-ptr size)
+			do
+			  (funcall type-context :read src-idx buffer dest-idx size))
+
+		     (with-lock-held (!lock)
+		       (setf !read-ptr (mod (+ !read-ptr size) !size))
+		       (setf !full-p nil)
+		       (condition-notify !full-state))
+		     size)))
+	  
+	  (dlambda 
+	    
+	    (:write-period(closure)
+			  (let ((closure-params
+				 (with-lock-held (!lock)
+				   (loop for room = (get-room-count) until (>= room !period) do
+					(when !error (error "Encounter following buffer error in read process:~a" !error))
+					(when !eof-p (error 'user-eof))
+					(condition-wait !full-state !lock))
+				   (memcpy-params !size !write-ptr !period))))
+			    
+			    (let  ((size
+				    (loop for (idx src-idx size) in closure-params sum
+					 (funcall closure type-context size))))
+
 			      (with-lock-held (!lock)
-				(loop for room = (get-room-count) until (> room 0) do
-				     (when !error (error "Encounter following buffer error in read process:~a" !error))
-				     (when !eof-p (error 'user-eof))
-				     (condition-wait !full-state !lock)
-				   finally (return (min size room))))))		  
+				(setf !write-ptr (mod (+ !write-ptr size) !size))
+				(when (= !write-ptr !read-ptr)
+				  (setf !full-p t))
+				(condition-notify !empty-state))
+			      size)))
+
+	    (:write (buffer size)
+		    (block process
+		      (unless (> size 0)(return-from process))
+		      (let ((idx 0))
+			(with-cffi-ptrs ((buffer !element-type))
+			  (loop-down (size !size request-size)
+			     (loop with total-bytes = 0 until (>= total-bytes request-size) do
+				  (let ((ret (buffer-write (&buffer idx) (- request-size total-bytes))))
+				    (incf idx ret)
+				    (incf total-bytes ret)))))
+			idx)))
+	    
+	    (:read (buffer size)
+		   (block process
+		     (unless (> size 0) (return-from process 0))
+		     (handler-bind ((ring-buffer-eof 
+				     (lambda(c)
+				       (invoke-restart 'flush (remaining c)))))
+		       (let ((idx 0))
 			 (with-cffi-ptrs ((buffer !element-type))
-			   (loop for (dest-idx src-idx size) in (memcpy-params !size !write-ptr size)
-			      do
-				(funcall type-context :memcpy (&!buffer dest-idx) (&buffer src-idx) size))) 	     
-			 (with-lock-held (!lock)
-			   (setf !write-ptr (mod (+ !write-ptr size) !size))
-			   (when (= !write-ptr !read-ptr)
-			     (setf !full-p t))
-			   (condition-notify !empty-state))
-			 size))
-		     (buffer-read(buffer size)
-		       (unless (> size 0)(return-from buffer-read 0))
-		       (let ((size
-			      (with-lock-held (!lock)       
-				(loop for fill-count = (get-fill-count) until (> fill-count 0) do
-				     (when !error (error "Encountered buffer error in read process"))
-				     (when !eof-p
-				       (error 'ring-buffer-eof :remaining fill-count))
-				     (condition-wait !empty-state !lock)
-				   finally (return (min size fill-count))))))
+			   (block reader
+			     (loop-down (size !size request-size)
+				(loop with total-bytes = 0 with eof = nil until (>= total-bytes request-size) do
+				     (let ((ret
+					    (restart-case
+						(buffer-read (&buffer idx) (- request-size total-bytes))
+					      (flush(remaining)
+						(setf eof t)
+						(buffer-read (&buffer idx) remaining)))))
+				       (incf idx ret)
+				       (incf total-bytes ret)
+				       (when eof (return-from reader)))))))
+			 idx))))
 
-			 (with-cffi-ptrs ((buffer !element-type))
-			   (loop for (src-idx dest-idx size) in (memcpy-params !size !read-ptr size)
-			      do
-				(funcall type-context :memcpy (&buffer dest-idx) (&!buffer src-idx)  size)))
-			 
-			 (with-lock-held (!lock)
-			   (setf !read-ptr (mod (+ !read-ptr size) !size))
-			   (setf !full-p nil)
-			   (condition-notify !full-state))
-			 size)))
-	      
-	      (dlambda 
-		
-		(:write-period(closure)
-			      (let ((closure-params
-				     (with-lock-held (!lock)
-				       (loop for room = (get-room-count) until (>= room !period) do
-					    (when !error (error "Encounter following buffer error in read process:~a" !error))
-					    (when !eof-p (error 'user-eof))
-					    (condition-wait !full-state !lock))
-				       (memcpy-params !size !write-ptr !period))))
-				
-				(with-cffi-ptrs ((!buffer !element-type))
-				  (let  ((size
-					  (loop for (idx src-idx size) in closure-params sum
-					       (funcall closure (&!buffer idx) size))))
-
-				    (with-lock-held (!lock)
-				      (setf !write-ptr (mod (+ !write-ptr size) !size))
-				      (when (= !write-ptr !read-ptr)
-					(setf !full-p t))
-				      (condition-notify !empty-state))
-				    size))))
-
-		
-		(:write (buffer size)
-			(block process
-			  (unless (> size 0)(return-from process))
-			  (let ((idx 0))
-			    (with-cffi-ptrs ((buffer !element-type))
-			      (loop-down (size !size request-size)
-				 (loop with total-bytes = 0 until (>= total-bytes request-size) do
-				      (let ((ret (buffer-write (&buffer idx) (- request-size total-bytes))))
-					(incf idx ret)
-					(incf total-bytes ret)))))
-			    idx)))
-		
-		(:read (buffer size)
-		       (block process
-			 (unless (> size 0) (return-from process 0))
-			 (handler-bind ((ring-buffer-eof 
-					 (lambda(c)
-					   (invoke-restart 'flush (remaining c)))))
-			   (let ((idx 0))
-			     (with-cffi-ptrs ((buffer !element-type))
-			       (block reader
-				 (loop-down (size !size request-size)
-				    (loop with total-bytes = 0 with eof = nil until (>= total-bytes request-size) do
-					 (let ((ret
-						(restart-case
-						    (buffer-read (&buffer idx) (- request-size total-bytes))
-						  (flush(remaining)
-						    (setf eof t)
-						    (buffer-read (&buffer idx) remaining)))))
-					   (incf idx ret)
-					   (incf total-bytes ret)
-					   (when eof (return-from reader)))))))
-			     idx))))
-
-		(:set-eof () (set-eof))
-		(:set-error (error) (set-error error))
-		(:destroy ()
-			  (set-eof)
-			  (release-lock !lock)
-			  (funcall type-context :free !buffer))))))))))
+	    (:set-eof () (set-eof))
+	    (:set-error (error) (set-error error))
+	    (:destroy ()
+		      (set-eof)
+		      (release-lock !lock)
+		      (funcall type-context :free))))))))
 
 (defparameter *thread-id* 0)
 
