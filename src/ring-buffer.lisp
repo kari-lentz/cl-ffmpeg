@@ -1,28 +1,5 @@
 (in-package :ring-buffer)
 
-(defun make-ring-buffer(size &key (element-type '(usigned-byte 8)))
-  (let ((!buffer (make-array size :element-type element-type))
-	(!read-ptr 0)
-	(!write-ptr 0)
-	(!size size)
-	(!full-p))
-    (flet ((get-byte-count()
-	     (if !full-p
-		 !size
-		 (mod (- !write-ptr !read-ptr) !size))))
-      (dlambda 
-	(:write (value) 
-	       (unless (<= (- !size (get-byte-count)) 0)
-		 (setf (aref !buffer !write-ptr) value)
-		 (setf !write-ptr (mod (1+ !write-ptr) !size))
-		 (unless (< (get-byte-count) !size) (setf !full-p t))))
-	(:read ()
-	      (unless (<= (get-byte-count) 0)
-		(let ((ret (aref !buffer !read-ptr)))
-		  (setf !read-ptr (mod (1+ !read-ptr) !size))
-		  (setf !full-p nil)
-		  ret)))))))
-
 (defctype size-t :int)
 
 (defcfun memcpy :pointer
@@ -98,8 +75,8 @@
 	   buffer
 	   buffer-2))))))
 
-(defun make-foreign-ring-buffer(size &key (element-type :uint8) (num-periods 2))
-  (let ((!type-context (make-cffi-context element-type :count size))
+(defun make-ring-buffer(type-context size &key (num-periods 2))
+  (let ((!type-context type-context)
 	(!period (/ size num-periods))
 	(!read-ptr 0)
 	(!write-ptr 0)
@@ -225,6 +202,10 @@
 		      (set-eof)
 		      (release-lock !lock)
 		      (funcall !type-context :free))))))))
+
+(defun make-foreign-ring-buffer(size &key (element-type :uint8) (num-periods 2))
+  (let ((type-context (make-cffi-context element-type :count size)))
+    (make-ring-buffer type-context size :num-periods num-periods)))
 
 (defparameter *thread-id* 0)
 
