@@ -62,6 +62,23 @@
 	(:free()
 	      (foreign-free !buffer))))))
 
+(defun array-copy(dest-array src-array count)
+  (for-each-range (idx count)
+    (setf (aref dest-array idx) (aref src-array idx))))
+
+(defun make-array-context(type &key (count 1))
+  (with-array-ptrs (!buffer src)
+    (let ((!buffer (make-array count :element-type type)))
+      (dlambda
+	(:write(dest-idx src src-idx count)
+	       (array-copy (&!buffer dest-idx) (&src src-idx) count))
+	(:read(dest-idx src src-idx count)
+	      (array-copy (&src src-idx) (&!buffer dest-idx) count))
+	(:&(ptr offset)
+	     (with-array-ptrs (ptr)
+	       (&ptr offset)))
+	(:free())))))
+
 (defun test-array()
   (with-array-ptrs (buffer)
     (let ((size 10))
@@ -75,7 +92,7 @@
 	   buffer
 	   buffer-2))))))
 
-(defun make-ring-buffer(type-context size &key (num-periods 2))
+(defun make-ring-buffer-internal(type-context size &key (num-periods 2))
   (let ((!type-context type-context)
 	(!period (/ size num-periods))
 	(!read-ptr 0)
@@ -205,7 +222,11 @@
 
 (defun make-foreign-ring-buffer(size &key (element-type :uint8) (num-periods 2))
   (let ((type-context (make-cffi-context element-type :count size)))
-    (make-ring-buffer type-context size :num-periods num-periods)))
+    (make-ring-buffer-internal type-context size :num-periods num-periods)))
+
+(defun make-ring-buffer(size &key (element-type 'integer) (num-periods 2))
+  (let ((type-context (make-array-context element-type :count size)))
+    (make-ring-buffer-internal type-context size :num-periods num-periods)))
 
 (defparameter *thread-id* 0)
 
@@ -243,25 +264,25 @@
 	    ,@body)
        (funcall ,buffer :destroy))))
 
-(defun write-buffer(ring-buffer c-buffer iter num-samples)
+(defun write-foreign-buffer(ring-buffer c-buffer iter num-samples)
   (for-each-range (idx num-samples)
     (setf (mem-aref c-buffer :int idx) (funcall iter :inc)))
   (funcall ring-buffer :write c-buffer num-samples))
 
-(defun test-buffer(&key (freq 1) (message-length 4096) (buffer-length 1024) (delay-reader-p) (delay-writer-p) (randomnize-p))
+(defun test-foreign-buffer(&key (freq 1) (message-length 4096) (buffer-length 1024) (delay-reader-p) (delay-writer-p) (randomnize-p))
   (with-foreign-ring-buffer (my-buffer buffer-length :element-type :int)
     (with-thread ("WRITE-PROCESS" 
 		  () 
 		  (let ((buffer-length message-length)(iter (make-iter)))
 		    (with-foreign-object (buffer :int buffer-length)
-		      (flet ((write-buffer(num-samples)
-			       (write-buffer my-buffer buffer iter num-samples)))
-			(write-buffer 3)
+		      (flet ((write-foreign-buffer(num-samples)
+			       (write-foreign-buffer my-buffer buffer iter num-samples)))
+			(write-foreign-buffer 3)
 			(loop for n from 1 to freq do
 			     (when delay-writer-p (sleep 3))
-			     (write-buffer (if randomnize-p (floor (* (random 1.0) buffer-length)) buffer-length))) 
-			;(write-buffer iter (ash buffer-length -1))
-			(write-buffer 3)
+			     (write-foreign-buffer (if randomnize-p (floor (* (random 1.0) buffer-length)) buffer-length))) 
+			;(write-foreign-buffer iter (ash buffer-length -1))
+			(write-foreign-buffer 3)
 			(funcall my-buffer :set-eof)))))
       (let ((buffer-length message-length)) 
 	(with-foreign-object (buffer :int buffer-length)
@@ -273,6 +294,44 @@
 	       (when (< num-samples message-length)
 		 (format t "NUM-SAMPLES:~a MESSAGE-LENGTH:~a~%" num-samples message-length)
 		 (return)))))))))
+
+(defstruct (test-data (:constructor test-data (value))) value) 
+
+(defun write-buffer(ring-buffer buffer iter num-samples)
+  (for-each-range (idx num-samples)
+    (setf (aref buffer idx) (test-data (funcall iter :inc))))
+  (funcall ring-buffer :write buffer num-samples))
+
+(defmacro with-ring-buffer((buffer size &key (element-type 'integer)) &body body)
+  `(let ((,buffer (make-ring-buffer ,size :element-type ,element-type)))
+     ,@body))
+
+(defun test-buffer(&key (freq 1) (message-length 4096) (buffer-length 1024) (delay-reader-p) (delay-writer-p) (randomnize-p))
+  (with-ring-buffer (my-buffer buffer-length :element-type 'test-data)
+    (with-thread ("WRITE-PROCESS" 
+		  () 
+		  (let ((buffer-length message-length)(iter (make-iter)))
+		    (let ((buffer (make-array buffer-length :element-type 'test-data)))
+		      (flet ((write-buffer(num-samples)
+			       (write-buffer my-buffer buffer iter num-samples)))
+			(write-buffer 3)
+			(loop for n from 1 to freq do
+			     (when delay-writer-p (sleep 3))
+			     (write-buffer (if randomnize-p (floor (* (random 1.0) buffer-length)) buffer-length))) 
+			;(write-buffer iter (ash buffer-length -1))
+			(write-buffer 3)
+			(funcall my-buffer :set-eof)))))
+      (let ((buffer-length message-length)) 
+	(let ((buffer (make-array buffer-length :element-type 'test-data)))
+	  (loop 
+	     (when delay-reader-p (sleep 3))
+	     (let ((num-samples (funcall my-buffer :read buffer buffer-length)))
+	       (for-each-range (idx num-samples)
+		 (format t "~a:~a~%" idx (aref buffer idx)))
+	       (when (< num-samples message-length)
+		 (format t "NUM-SAMPLES:~a MESSAGE-LENGTH:~a~%" num-samples message-length)
+		 (return)))))))))
+
 
 (defun kill-write-processes()
   (loop for thread in (bordeaux-threads:all-threads) when (~ "WRITE-PROCESS" (thread-name thread))
