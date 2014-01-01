@@ -7,6 +7,31 @@
   (src :pointer)
   (n size-t))
 
+(defun *memcpy-params(closure ring-buffer-size ring-buffer-begin external-buffer-begin request-size)
+  (let ((remaining request-size))
+    (loop while (> remaining 0) sum
+	 (let ((request-size (if (<= (+ ring-buffer-begin remaining) ring-buffer-size)
+				 remaining
+				 (- ring-buffer-size ring-buffer-begin))))
+	   (let ((ret (funcall closure ring-buffer-begin external-buffer-begin request-size)))
+	     (decf remaining ret)
+	     (setf ring-buffer-begin (mod (+ ring-buffer-begin ret) ring-buffer-size))
+	     (incf external-buffer-begin ret)
+	     ret)))))
+
+(defmacro with-memcpy(ring-buffer-size (ring-buffer-begin-ptr external-buffer-begin-ptr request-size) &body buffer-code)
+  (with-gensyms (f)
+    `(let ((,f (lambda(,ring-buffer-begin-ptr ,external-buffer-begin-ptr ,request-size)
+		 (progn ,@buffer-code))))
+       (*memcpy-params ,f ,ring-buffer-size ,ring-buffer-begin-ptr ,external-buffer-begin-ptr ,request-size))))
+       
+(defun test-memcpy(!size ring-buffer-begin request-size &key (limit (/ request-size 2)))
+  (let ((external-buffer-begin 0))
+    (with-memcpy !size (ring-buffer-begin external-buffer-begin request-size)
+      (let ((ret (min request-size limit)))
+	(format t "~a:~a:~a:~a~%" ring-buffer-begin external-buffer-begin request-size ret)
+	ret))))
+   
 (defun memcpy-params(!size begin size)
   (with-collector (!push)
     (if (<= (+ begin size) !size)
@@ -56,6 +81,8 @@
 	       (memcpy (&!buffer dest-idx) (&src src-idx) (* (foreign-type-size type) count)))
 	(:read(dest-idx src src-idx count)
 	      (memcpy (&src src-idx) (&!buffer dest-idx) (* (foreign-type-size type) count)))
+	(:&&(offset)
+	       (&!buffer offset))
 	(:&(ptr offset)
 	     (with-cffi-ptrs ((ptr type))
 	       (&ptr offset)))
@@ -77,6 +104,8 @@
 	(:&(ptr offset)
 	     (with-array-ptrs (ptr)
 	       (&ptr offset)))
+	(:&&(offset)
+	    (&!buffer offset))
 	(:free())))))
 
 (defun test-array()
@@ -172,8 +201,7 @@
 			    
 			    (let  ((size
 				    (loop for (idx src-idx size) in closure-params sum
-					 (funcall closure !type-context size))))
-
+					 (funcall closure (funcall !type-context :&& idx) size))))
 			      (with-lock-held (!lock)
 				(setf !write-ptr (mod (+ !write-ptr size) !size))
 				(when (= !write-ptr !read-ptr)
