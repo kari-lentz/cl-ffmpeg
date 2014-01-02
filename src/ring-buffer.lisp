@@ -19,19 +19,34 @@
 	     (incf external-buffer-begin ret)
 	     ret)))))
 
+(with-full-eval
+  (defstruct (binding (:constructor binding (key &optional (value key)))) key value)
+
+  (defun make-binding(spec)
+    (let ((spec (if (consp spec) spec (list spec))))
+      (apply #'binding spec))))
+
+(defmacro with-bindings((&rest specs) &body body)
+  `(let ,(loop for spec in specs collecting `(,spec (make-binding ,spec)))
+     (macrolet ((k(spec-var)
+		  `(binding-key ,spec-var))
+		(v(spec-var)
+		  `(binding-value ,spec-var)))
+       ,@body)))
+
 (defmacro with-memcpy(ring-buffer-size (ring-buffer-begin-ptr external-buffer-begin-ptr request-size) &body buffer-code)
   (with-gensyms (f)
-    `(let ((,f (lambda(,ring-buffer-begin-ptr ,external-buffer-begin-ptr ,request-size)
-		 (progn ,@buffer-code))))
-       (*memcpy-params ,f ,ring-buffer-size ,ring-buffer-begin-ptr ,external-buffer-begin-ptr ,request-size))))
+    (with-bindings (ring-buffer-begin-ptr external-buffer-begin-ptr request-size)
+      `(let ((,f (lambda(,(k ring-buffer-begin-ptr) ,(k external-buffer-begin-ptr) ,(k request-size))
+		   (progn ,@buffer-code))))
+	 (*memcpy-params ,f ,ring-buffer-size ,(v ring-buffer-begin-ptr) ,(v external-buffer-begin-ptr) ,(v request-size))))))
        
-(defun test-memcpy(!size ring-buffer-begin request-size &key (limit (/ request-size 2)))
-  (let ((external-buffer-begin 0))
-    (with-memcpy !size (ring-buffer-begin external-buffer-begin request-size)
-      (let ((ret (min request-size limit)))
-	(format t "~a:~a:~a:~a~%" ring-buffer-begin external-buffer-begin request-size ret)
-	ret))))
-   
+(defun test-memcpy(!size ring-buffer-begin request-size &key (external-buffer-begin 0) (limit (/ request-size 2)))
+  (with-memcpy !size ((rb-begin ring-buffer-begin) (ext-buf external-buffer-begin) request-size)
+    (let ((ret (min request-size limit)))
+      (format t "~a:~a:~a:~a~%" rb-begin ext-buf request-size ret)
+      ret)))
+
 (defun memcpy-params(!size begin size)
   (with-collector (!push)
     (if (<= (+ begin size) !size)
@@ -157,7 +172,7 @@
 				 (when !error (error "Encounter following buffer error in read process:~a" !error))
 				 (when !eof-p (error 'user-eof))
 				 (condition-wait !full-state !lock)
-			       finally (return (min size room))))))		  
+			       finally (return (min size room))))))
 		     (loop for (dest-idx src-idx size) in (memcpy-params !size !write-ptr size)
 			do
 			  (funcall !type-context :write dest-idx buffer src-idx size)) 	     
