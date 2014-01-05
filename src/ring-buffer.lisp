@@ -44,7 +44,7 @@
        
 (defun test-memcpy(!size ring-buffer-begin request-size &key (external-buffer-begin 0) (limit (/ request-size 2)))
   (with-memcpy !size ((rb-begin ring-buffer-begin) (ext-buf external-buffer-begin) (size request-size))
-    (let ((ret (min request-size limit)))
+    (let ((ret (min size limit)))
       (format t "~a:~a:~a:~a~%" rb-begin ext-buf size ret)
       ret)))
 
@@ -229,6 +229,33 @@
 				(setf !full-p t))
 			      (condition-notify !empty-state))
 			      ret))
+
+	    (:read-period(closure)
+
+			 (let ((size
+				(handler-bind ((ring-buffer-eof (lambda(c) (invoke-restart 'flush-remaining (remaining c)))))
+				  (with-lock-held (!lock)     
+				    (restart-case
+					(loop for fill-count = (get-fill-count) until (>= fill-count !period) do
+					     (when !error (error "Encountered buffer error in period read process"))
+					     (when !eof-p
+					       (error 'ring-buffer-eof :remaining fill-count))
+					     (condition-wait !empty-state !lock)
+					   finally (return !period))
+				      (flush-remaining(remaining)
+					remaining))))))
+			   
+			   (let ((ret
+				  (with-memcpy !size ((src-idx !read-ptr)(dest-idx 0)(request-size size))
+				    (declare (ignore dest-idx))
+				    (funcall closure (funcall !type-context :&& src-idx) request-size))))
+
+			     (with-lock-held (!lock)
+			       (setf !read-ptr (mod (+ !read-ptr ret) !size))
+			       (when (> ret 0)
+				 (setf !full-p nil))
+			       (condition-notify !full-state))
+			     ret)))
 	  
 	    (:write (buffer size)
 		    (block process
@@ -306,8 +333,8 @@
 	  (post-fix init
 		    (incf init delta)))))
 
-(defmacro with-foreign-ring-buffer((buffer size &key (element-type :uint8)) &body body)
-  `(let ((,buffer (make-foreign-ring-buffer ,size :element-type ,element-type)))
+(defmacro with-foreign-ring-buffer((buffer size &key (element-type :uint8) (num-periods 2)) &body body)
+  `(let ((,buffer (make-foreign-ring-buffer ,size :element-type ,element-type :num-periods ,num-periods)))
      (unwind-protect
 	  (progn
 	    ,@body)
@@ -351,12 +378,12 @@
     (setf (aref buffer idx) (test-data (funcall iter :inc))))
   (funcall ring-buffer :write buffer num-samples))
 
-(defmacro with-ring-buffer((buffer size &key (element-type 'integer)) &body body)
-  `(let ((,buffer (make-ring-buffer ,size :element-type ,element-type)))
+(defmacro with-ring-buffer((buffer size &key (element-type 'integer) (num-periods 2)) &body body)
+  `(let ((,buffer (make-ring-buffer ,size :element-type ,element-type :num-periods ,num-periods)))
      ,@body))
 
-(defun test-buffer(&key (freq 1) (message-length 4096) (buffer-length 1024) (delay-reader-p) (delay-writer-p) (randomnize-p))
-  (with-ring-buffer (my-buffer buffer-length :element-type 'test-data)
+(defun test-buffer(&key (freq 1) (message-length 4096) (buffer-length 1024) (delay-reader-p) (delay-writer-p) (randomnize-p) (read-period-p) (num-periods 4))
+  (with-ring-buffer (my-buffer buffer-length :element-type 'test-data :num-periods num-periods)
     (with-thread ("WRITE-PROCESS" 
 		  () 
 		  (let ((buffer-length message-length)(iter (make-iter)))
@@ -370,17 +397,28 @@
 			;(write-buffer iter (ash buffer-length -1))
 			(write-buffer 3)
 			(funcall my-buffer :set-eof)))))
-      (let ((buffer-length message-length)) 
-	(let ((buffer (make-array buffer-length :element-type 'test-data)))
-	  (loop 
-	     (when delay-reader-p (sleep 3))
-	     (let ((num-samples (funcall my-buffer :read buffer buffer-length)))
-	       (for-each-range (idx num-samples)
-		 (format t "~a:~a~%" idx (aref buffer idx)))
-	       (when (< num-samples message-length)
-		 (format t "NUM-SAMPLES:~a MESSAGE-LENGTH:~a~%" num-samples message-length)
-		 (return)))))))))
-
+      (if read-period-p
+	  (let ((period-length (/ buffer-length num-periods)))
+	    (loop 
+	       (when delay-reader-p (sleep 3))
+	       (flet ((buffer-read(buffer num-samples)
+			(for-each-range (idx num-samples)
+			  (format t "READ-PERIOD:~a:~a~%" idx (aref buffer idx)))
+			num-samples))
+		 (let ((num-samples (funcall my-buffer :read-period #'buffer-read)))
+		   (when (< num-samples period-length)
+		     (format t "NUM-SAMPLES:~a MESSAGE-LENGTH:~a~%" num-samples message-length)
+		     (return))))))	  
+	  (let ((buffer-length message-length)) 
+	    (let ((buffer (make-array buffer-length :element-type 'test-data)))
+	      (loop 
+		 (when delay-reader-p (sleep 3))
+		 (let ((num-samples (funcall my-buffer :read buffer buffer-length)))
+		   (for-each-range (idx num-samples)
+		     (format t "~a:~a~%" idx (aref buffer idx)))
+		   (when (< num-samples message-length)
+		     (format t "NUM-SAMPLES:~a MESSAGE-LENGTH:~a~%" num-samples message-length)
+		     (return))))))))))
 
 (defun kill-write-processes()
   (loop for thread in (bordeaux-threads:all-threads) when (~ "WRITE-PROCESS" (thread-name thread))
