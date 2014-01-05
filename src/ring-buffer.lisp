@@ -14,6 +14,7 @@
 				 remaining
 				 (- ring-buffer-size ring-buffer-begin))))
 	   (let ((ret (funcall closure ring-buffer-begin external-buffer-begin request-size)))
+	     (unless ret (error "*memcpy-params* -> ring-buffer closure must return something"))
 	     (decf remaining ret)
 	     (setf ring-buffer-begin (mod (+ ring-buffer-begin ret) ring-buffer-size))
 	     (incf external-buffer-begin ret)
@@ -26,8 +27,8 @@
     (let ((spec (if (consp spec) spec (list spec))))
       (apply #'binding spec))))
 
-(defmacro with-bindings((&rest specs) &body body)
-  `(let ,(loop for spec in specs collecting `(,spec (make-binding ,spec)))
+(defmacro with-bindings((&rest spec-vars) &body body)
+  `(let ,(loop for spec-var in spec-vars collecting `(,spec-var (make-binding ,spec-var)))
      (macrolet ((k(spec-var)
 		  `(binding-key ,spec-var))
 		(v(spec-var)
@@ -38,13 +39,13 @@
   (with-gensyms (f)
     (with-bindings (ring-buffer-begin-ptr external-buffer-begin-ptr request-size)
       `(let ((,f (lambda(,(k ring-buffer-begin-ptr) ,(k external-buffer-begin-ptr) ,(k request-size))
-		   (progn ,@buffer-code))))
+		   ,@buffer-code)))
 	 (*memcpy-params ,f ,ring-buffer-size ,(v ring-buffer-begin-ptr) ,(v external-buffer-begin-ptr) ,(v request-size))))))
        
 (defun test-memcpy(!size ring-buffer-begin request-size &key (external-buffer-begin 0) (limit (/ request-size 2)))
-  (with-memcpy !size ((rb-begin ring-buffer-begin) (ext-buf external-buffer-begin) request-size)
+  (with-memcpy !size ((rb-begin ring-buffer-begin) (ext-buf external-buffer-begin) (size request-size))
     (let ((ret (min request-size limit)))
-      (format t "~a:~a:~a:~a~%" rb-begin ext-buf request-size ret)
+      (format t "~a:~a:~a:~a~%" rb-begin ext-buf size ret)
       ret)))
 
 (defun memcpy-params(!size begin size)
@@ -93,9 +94,11 @@
     (let ((!buffer (foreign-alloc type :count count)))
       (dlambda
 	(:write(dest-idx src src-idx count)
-	       (memcpy (&!buffer dest-idx) (&src src-idx) (* (foreign-type-size type) count)))
+	       (memcpy (&!buffer dest-idx) (&src src-idx) (* (foreign-type-size type) count))
+	       count)
 	(:read(dest-idx src src-idx count)
-	      (memcpy (&src src-idx) (&!buffer dest-idx) (* (foreign-type-size type) count)))
+	      (memcpy (&src src-idx) (&!buffer dest-idx) (* (foreign-type-size type) count))
+	      count)
 	(:&&(offset)
 	       (&!buffer offset))
 	(:&(ptr offset)
@@ -113,9 +116,11 @@
     (let ((!buffer (make-array count :element-type type)))
       (dlambda
 	(:write(dest-idx src src-idx count)
-	       (array-copy (&!buffer dest-idx) (&src src-idx) count))
+	       (array-copy (&!buffer dest-idx) (&src src-idx) count)
+	       count)
 	(:read(dest-idx src src-idx count)
-	      (array-copy (&src src-idx) (&!buffer dest-idx) count))
+	      (array-copy (&src src-idx) (&!buffer dest-idx) count)
+	      count)
 	(:&(ptr offset)
 	     (with-array-ptrs (ptr)
 	       (&ptr offset)))
@@ -173,15 +178,17 @@
 				 (when !eof-p (error 'user-eof))
 				 (condition-wait !full-state !lock)
 			       finally (return (min size room))))))
-		     (loop for (dest-idx src-idx size) in (memcpy-params !size !write-ptr size)
-			do
-			  (funcall !type-context :write dest-idx buffer src-idx size)) 	     
-		     (with-lock-held (!lock)
-		       (setf !write-ptr (mod (+ !write-ptr size) !size))
-		       (when (= !write-ptr !read-ptr)
-			 (setf !full-p t))
-		       (condition-notify !empty-state))
-		     size))
+
+		     (let ((ret (with-memcpy !size ((dest-idx !write-ptr) (src-idx 0) size)
+				  (funcall !type-context :write dest-idx buffer src-idx size)))) 	     
+
+		       (with-lock-held (!lock)
+			 (setf !write-ptr (mod (+ !write-ptr ret) !size))
+			 (when (= !write-ptr !read-ptr)
+			   (setf !full-p t))
+			 (condition-notify !empty-state))
+		       ret)))
+
 		 (buffer-read(buffer size)
 		   (unless (> size 0)(return-from buffer-read 0))
 		   (let ((size
@@ -192,38 +199,37 @@
 				   (error 'ring-buffer-eof :remaining fill-count))
 				 (condition-wait !empty-state !lock)
 			       finally (return (min size fill-count))))))
-		     
-		     (loop for (src-idx dest-idx size) in (memcpy-params !size !read-ptr size)
-			do
-			  (funcall !type-context :read src-idx buffer dest-idx size))
 
-		     (with-lock-held (!lock)
-		       (setf !read-ptr (mod (+ !read-ptr size) !size))
-		       (setf !full-p nil)
-		       (condition-notify !full-state))
-		     size)))
-	  
+		     (let ((ret (with-memcpy !size ((src-idx !read-ptr) (dest-idx 0) size)
+				  (funcall !type-context :read src-idx buffer dest-idx size))))
+
+		       (with-lock-held (!lock)
+			 (setf !read-ptr (mod (+ !read-ptr ret) !size))
+			 (setf !full-p nil)
+			 (condition-notify !full-state))
+		       ret))))
+    
 	  (dlambda 
 	    
 	    (:write-period(closure)
-			  (let ((closure-params
-				 (with-lock-held (!lock)
-				   (loop for room = (get-room-count) until (>= room !period) do
-					(when !error (error "Encounter following buffer error in read process:~a" !error))
-					(when !eof-p (error 'user-eof))
-					(condition-wait !full-state !lock))
-				   (memcpy-params !size !write-ptr !period))))
-			    
-			    (let  ((size
-				    (loop for (idx src-idx size) in closure-params sum
-					 (funcall closure (funcall !type-context :&& idx) size))))
-			      (with-lock-held (!lock)
-				(setf !write-ptr (mod (+ !write-ptr size) !size))
-				(when (= !write-ptr !read-ptr)
-				  (setf !full-p t))
-				(condition-notify !empty-state))
-			      size)))
+			  (with-lock-held (!lock)
+			    (loop for room = (get-room-count) until (>= room !period) do
+				 (when !error (error "Encounter following buffer error in read process:~a" !error))
+				 (when !eof-p (error 'user-eof))
+				 (condition-wait !full-state !lock)))
+ 
+			  (let ((ret 
+				 (with-memcpy !size ((dest-ptr !write-ptr) (src-ptr 0) (size !period))
+				   (declare (ignore src-ptr))
+				   (funcall closure (funcall !type-context :&& dest-ptr) size))))
 
+			    (with-lock-held (!lock)
+			      (setf !write-ptr (mod (+ !write-ptr size) ret))
+			      (when (= !write-ptr !read-ptr)
+				(setf !full-p t))
+			      (condition-notify !empty-state))
+			      ret))
+	  
 	    (:write (buffer size)
 		    (block process
 		      (unless (> size 0)(return-from process))
