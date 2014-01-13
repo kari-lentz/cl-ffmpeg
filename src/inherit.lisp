@@ -17,7 +17,7 @@
 
 (defstruct* (ffmpeg-env (:constructor ffmpeg-env (ring-buffer in-device out-device)))
     (:export-p t)
-    ring-buffer (output-buffer-size 16384) in-device out-device (media-type :avmedia-type-audio))
+    ring-buffer (output-buffer-size 16384) (num-periods 4) in-device out-device (media-type :avmedia-type-audio))
 
 (defstruct* 
     (audio-params 

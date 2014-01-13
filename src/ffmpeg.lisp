@@ -326,7 +326,7 @@
 (defun read-from-buffer(ring-buffer frame)
   (let ((ret (funcall ring-buffer :read (mem-ref (avframe-overlay-data frame) '(:pointer (:struct audio-frame))) (avframe-overlay-nb-samples frame))))
     (setf (avframe-overlay-nb-samples frame) ret)))
-        
+
 (defgeneric run-ffmpeg-in(audio-params in-device)) 
 (defgeneric run-ffmpeg-out(audio-params out-device)) 
 
@@ -339,24 +339,37 @@
 	  (with-resampled-frame (frame-out swr-ctx-mgr frame-in sample-rate num-channels)
 	    (write-to-buffer buffer frame-out)))))))
 
+(defun buffered-reader(p-format-context-out p-codec-context-out num-channels sample-rate stream-type encoded-packets)
+  (lambda(buffer num-samples)
+    (with-cffi-ptrs ((buffer '(:pointer (:struct audio-frame))))
+      (with-buffered-frame (frame-out num-samples :rate sample-rate :num-channels num-channels :user-data (&buffer 0))
+	(with-encoded-packet (p-codec-context-out stream-type packet-out frame-out)
+	  (av-interleaved-write-frame p-format-context-out packet-out)
+	    (incf encoded-packets)
+	    num-samples)))))
+      
 (defmethod run-ffmpeg-out((audio-params audio-params) (out-device pathname))
   (let ((encoded-packets 0))
-    (with-slots (ring-buffer sample-rate num-channels (stream-type media-type) output-buffer-size) audio-params
-      (with-output-sink (p-format-context-out (namestring out-device))
-	(with-audio-encoder (p-codec-context-out p-format-context-out stream-type :num-channels num-channels :sample-rate sample-rate)
-	  (avformat-write-header p-format-context-out (null-pointer)) 
-	  (loop
-	     (with-buffered-frame (frame-out output-buffer-size :rate sample-rate :num-channels num-channels)
-	       (let ((ret (read-from-buffer ring-buffer frame-out)))
-		 (with-encoded-packet (p-codec-context-out stream-type packet-out frame-out)
-		   (av-interleaved-write-frame p-format-context-out packet-out)
-		   (incf encoded-packets)
-		   (unless (= ret output-buffer-size) (return))))))
-	  (format t "WRITING TRAILER!!!~%")
-	  (av-write-trailer p-format-context-out))))))
+    (with-slots (ring-buffer sample-rate num-channels (stream-type media-type) num-periods output-buffer-size) audio-params
+      (let ((period-size (/ output-buffer-size num-periods)))
+	(with-output-sink (p-format-context-out (namestring out-device))
+	  (with-audio-encoder (p-codec-context-out p-format-context-out stream-type :num-channels num-channels :sample-rate sample-rate)
+	    (avformat-write-header p-format-context-out (null-pointer))
+	    (flet ((buffered-reader(buffer num-samples)
+		     (with-cffi-ptrs ((buffer '(:pointer (:struct audio-frame))))
+		       (with-buffered-frame (frame-out num-samples :rate sample-rate :num-channels num-channels :user-data (&buffer 0))
+			 (with-encoded-packet (p-codec-context-out stream-type packet-out frame-out)
+			   (av-interleaved-write-frame p-format-context-out packet-out)
+			   (incf encoded-packets)
+			   num-samples)))))
+	      (loop
+		 (let ((ret (funcall ring-buffer :read-period #'buffered-reader)))
+		   (unless (= ret period-size) (return))))
+	      (format t "WRITING TRAILER!!!~%")
+	      (av-write-trailer p-format-context-out))))))))
 
-(defmacro with-audio-buffer((buffer &key (ring-buffer-size 65536)) &body body)
-  `(with-foreign-ring-buffer (,buffer ,ring-buffer-size :element-type '(:struct audio-frame))
+(defmacro with-audio-buffer((buffer &key (ring-buffer-size 65536) (num-periods 2)) &body body)
+  `(with-foreign-ring-buffer (,buffer ,ring-buffer-size :num-periods ,num-periods :element-type '(:struct audio-frame))
      ,@body))
 
 (defmacro with-sdl-window((&key (width 320) (height 240) (event-type :wait)) &body event-body)
@@ -377,10 +390,10 @@
 			  (eq key :sdl-key-x))
 		       (sdl:push-quit-event)))))
 
-(defun run-ffmpeg(ffmpeg-env in-device out-device &key (ring-buffer-size 65536))
-  (with-slots (ring-buffer) ffmpeg-env
+(defun run-ffmpeg(ffmpeg-env in-device out-device)
+  (with-slots (ring-buffer output-buffer-size num-periods) ffmpeg-env
     (with-ffmpeg ()
-      (with-audio-buffer (buffer :ring-buffer-size ring-buffer-size)
+      (with-audio-buffer (buffer :ring-buffer-size output-buffer-size :num-periods num-periods)
 	(setf ring-buffer buffer)
 	(with-thread ("FFMPEG-WRITER"
 		      ()
