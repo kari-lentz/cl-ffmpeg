@@ -319,34 +319,4 @@
 	(set-params-hw pcm hw-params audio-params alsa-device)
 	(with-sw-params (pcm sw-params)
 	  (set-params-sw pcm sw-params alsa-device)
-	  (format t "ALSA:~a:~a:~a~%" pcm hw-params sw-params))))))
-	  
-;; (defmethod run-ffmpeg-out(audio-params (device-out sdl-audio-device))
-;;   (sdl:with-init (sdl:sdl-init-video sdl:sdl-init-audio)
-;;     (with-slots (sample-rate num-channels output-buffer-size) audio-params
-;;       (with-foreign-objects ((seq-num :int)(audio-spec '(:struct sdl-audio-spec)))
-;; 	(with-foreign-slots ((freq format channels samples callback userdata) audio-spec (:struct sdl-audio-spec))
-	  
-;; 	  (format t "HOLY COW!!:~a~%" sample-rate)
-;; 	  (zero-memory audio-spec '(:struct sdl-audio-spec)) 
-;; 	  (setf freq sample-rate)
-;; 	  (setf format (foreign-enum-value 'sdl-audio-formats :audio-s16))
-;; 	  (setf channels num-channels)
-;; 	  (setf samples output-buffer-size)
-;; 	  (setf callback (callback sdl-audio-player))
-;; 	  (setf (mem-ref seq-num :int) (register-sdl-audio-device device-out))
-;; 	  (setf userdata seq-num)
-
-;; 	  (sdl-open-audio audio-spec (null-pointer))
-       
-;; 	  (unwind-protect 
-;; 	       (progn
-;; 		 (sdl-pause-audio 0)
-;; 		 (with-slots (done-waiter wait-lock) device-out
-;; 		   (with-lock-held (wait-lock)
-;; 		     (condition-wait done-waiter wait-lock))))
-;; 	    (sdl-close-audio)))))))
-
-;; (defun run-sdl(&optional (file-path "/mnt/MUSIC-THD/test.hd.mp4"))
-;;   (run-ffmpeg (audio-params) (pathname file-path) (sdl-audio-device)))      
-	       
+	  (format t "ALSA:~a:~a:~a~%" pcm hw-params sw-params))))))	       
