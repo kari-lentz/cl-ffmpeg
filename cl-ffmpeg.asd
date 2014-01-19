@@ -9,9 +9,10 @@
   ((:module src
 	    :components
 	    ((:file "packages")
+	     (:file "media-time" :depends-on ("packages"))
 	     (:file "cffi-helper" :depends-on ("packages"))
-	     (:file "ring-buffer" :depends-on ("cffi-helper" "packages"))
-	     (:file "ffmpeg-cffi" :depends-on ("cffi-helper" "packages"))
+	     (:file "ring-buffer" :depends-on ("media-time" "cffi-helper" "packages"))
+	     (:file "ffmpeg-cffi" :depends-on ("media-time" "cffi-helper" "packages"))
 	     (:file "inherit" :depends-on ("packages"))
 	     (:file "ffmpeg" :depends-on ("ring-buffer" "inherit" "ffmpeg-cffi"))
 	     (:file "alsa" :depends-on ("ffmpeg" "inherit" "ffmpeg-cffi" "ring-buffer" "cffi-helper" "packages"))))))
