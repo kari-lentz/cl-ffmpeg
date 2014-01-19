@@ -8,6 +8,12 @@
     (multiple-value-bind (total-secs frac) (floor (/ total-ms 1000))
       (media-time (dts+ (media-time-dts media-time) total-secs :seconds) (* 1000 frac)))))
 
+(defun media-time-(media-time-1 media-time-2)
+  (let ((total-ms (- (media-time-ms media-time-1) (media-time-ms media-time-2)))) 
+    (+ 
+     (* 1000 (- (dts-ut (media-time-dts media-time-1)) (dts-ut (media-time-dts media-time-2))))
+     total-ms)))
+
 (defmacro define-comparator(comp comp-hi comp-lo media-time-1 media-time-2)
   (with-gensyms (ut-1 ut-2)
     `(defun ,(.sym 'media-time comp) (,media-time-1 ,media-time-2)

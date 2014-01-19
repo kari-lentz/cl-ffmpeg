@@ -16,7 +16,7 @@
 (defpackage :cl-media-time
   (:documentation "front end for cl-ffmpeg")
   (:use :cl :cffi :my-env :utility)
-  (:export media-time media-time+ media-time> media-time>= media-time< media-time<=))
+  (:export media-time media-time+ media-time- media-time> media-time>= media-time< media-time<=))
 
 (defpackage :cl-ffmpeg
   (:documentation "front end for cl-ffmpeg")
