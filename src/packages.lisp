@@ -20,7 +20,7 @@
 
 (defpackage :cl-ffmpeg
   (:documentation "front end for cl-ffmpeg")
-  (:use :cl :cffi :my-env :my-db :utility :ring-buffer :cffi-helper :cl-ffmpeg-inherit)
+  (:use :cl :cffi :my-env :my-db :utility :ring-buffer :cffi-helper :cl-ffmpeg-inherit :cl-media-time)
   (:export :run-ffmpeg :run-ffmpeg-in :run-ffmpeg-out :with-audio-buffer :with-ffmpeg :run))
 
 (defpackage :cl-alsa
