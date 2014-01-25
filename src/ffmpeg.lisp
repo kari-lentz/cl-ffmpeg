@@ -1,5 +1,26 @@
 (in-package :cl-ffmpeg)
 
+(defmacro with-struct-readers((&rest slots) instance type &body body)
+  (with-once-only (instance)
+    `(let ,(loop for (slot-outer slot-inner) in (ensure-pairs slots) collecting
+		`(,slot-outer (,(.sym type '- slot-inner) ,instance)))
+       ,@body)))
+
+(defstruct (video-frame (:constructor video-frame (width height &key (mmtime (media-time)) played-p skipped-p (frame-data (foreign-alloc :unsigned-char :count (* 2 width height)))))) mmtime played-p skipped-p width height frame-data)
+
+(defun destroy-video-frame(frame)
+  (with-slots (frame-data) frame
+    (foreign-free frame-data)
+    (setf frame-data nil)))
+
+(defmacro with-anchored-video-frame((data linesize) frame &body body)
+  (with-gensyms (buffer width height av-picture)
+    `(with-struct-readers ((,buffer frame-data) (,width width) (,height height)) ,frame video-frame 
+       (with-foreign-object (,av-picture '(:struct av-picture)) 
+	 (anchor-picture ,av-picture ,width ,height ,buffer)
+	 (with-cffi-readers ((,data data) (,linesize linesize)) av-picture ,av-picture 
+	   ,@body)))))
+
 (defmacro with-foreign-array-to-lisp((foreign-array foreign-type lisp-array) &body body)
   (with-once-only (foreign-array lisp-array)
     (with-gensyms (length idx)
@@ -300,11 +321,6 @@
 	   `((av-frame-get-buffer ,frame-out 0)))
      ,@body))
  
-;; (defmacro with-buffered-video-frame((frame-out video-params) &body body)
-;;   `(with-slots ((in-width width)(in-height height)) video-params 
-;;      (with-av-frame ,frame-out       
-;;        ,@body
-
 (defmacro with-resampled-frame((frame-out swr-ctx-mgr frame-in &optional (rate 44100) (num-channels 2)) &body body)
   (with-gensyms(nb-samples swr-ctx)
     `(let ((,nb-samples (ceiling  (/ (* ,rate (avframe-overlay-nb-samples ,frame-in)) (av-frame-get-sample-rate ,frame-in)))))
@@ -313,12 +329,12 @@
 	  (setf (avframe-overlay-nb-samples ,frame-out) (swr-convert ,swr-ctx (avframe-overlay-data ,frame-out) ,nb-samples (avframe-overlay-data ,frame-in) (avframe-overlay-nb-samples ,frame-in)))
 	  ,@body)))))
 
-(defmacro with-scaled-frame((frame-out sws-context frame-in) &body body) 
-  `(with-cffi-readers ((in-width width) (in-height height) (in-data data) (in-linesize linesize) format) AVFrame-Overlay ,frame-in
-     (with-cffi-readers ((out-width width)(out-height)(out-data data)(out-linesize linesize)) AVFrame-Overlay ,frame-out
-       (let ((,sws-context (sws-get-cached-context in-width in-height format out-width out-height :AV-PIX-FMT-YUV420P 0 (null-pointer) (null-pointer) 0)))
-	 (sws-scale ,sws-context data line-size 0 in-height out-data out-linesize)
-	 ,@body))))
+(defun scale-frame(frame-out sws-context frame-in)
+  (with-cffi-readers ((in-width width) (in-height height) (in-data data) (in-linesize linesize) format) AVFrame-Overlay frame-in
+     (with-struct-readers ((out-width width)(out-height height)) frame-out video-frame
+       (with-anchored-video-frame (out-data out-linesize) frame-out
+	 (let ((sws-context (sws-get-cached-context sws-context in-width in-height format out-width out-height :AV-PIX-FMT-YUV420P 0 (null-pointer) (null-pointer) 0)))
+	   (sws-scale sws-context in-data in-linesize 0 in-height out-data out-linesize))))))
 
 (defun write-to-buffer(ring-buffer frame)
   (funcall ring-buffer :write (mem-ref (avframe-overlay-data frame) '(:pointer (:struct audio-frame))) (avframe-overlay-nb-samples frame)))
@@ -338,6 +354,18 @@
 	  (incf frames)
 	  (with-resampled-frame (frame-out swr-ctx-mgr frame-in sample-rate num-channels)
 	    (write-to-buffer buffer frame-out)))))))
+
+(defmethod run-ffmpeg-in((video-params video-params) (in-device pathname))
+  (with-slots ((stream-type media-type) (buffer ring-buffer)) video-params
+    (let ((sws-ctx (null-pointer)))
+      (let ((frames 0))
+	(in-decoded-frame-read-loop (frame-in (namestring in-device) stream-type)
+	  (flet ((frame-writer(video-frames count)
+		   (for-each-range (idx count)
+		     (let ((video-frame (aref video-frames idx)))
+		       (scale-frame video-frame sws-ctx frame-in)
+		       (incf frames)))))
+	    (funcall :write-period buffer #'frame-writer)))))))
 
 (defun buffered-reader(p-format-context-out p-codec-context-out num-channels sample-rate stream-type encoded-packets)
   (lambda(buffer num-samples)
