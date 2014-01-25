@@ -374,6 +374,7 @@
   (callback :pointer))
 
 (defcfun (sws-get-cached-context "sws_getCachedContext") :pointer
+  (context :pointer)
   (src-w :int)
   (src-h :int)
   (src-format AVPixel-Format)
