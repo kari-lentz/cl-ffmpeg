@@ -111,9 +111,12 @@
   (for-each-range (idx count)
     (setf (aref dest-array idx) (aref src-array idx))))
 
-(defun make-array-context(type &key (count 1))
+(defun make-array-context(type &key (count 1) element-factory)
   (with-array-ptrs (!buffer src)
     (let ((!buffer (make-array count :element-type type)))
+      (when element-factory
+	(for-each-range (idx count)
+	  (setf (aref !buffer idx) (funcall element-factory))))
       (dlambda
 	(:write(dest-idx src src-idx count)
 	       (array-copy (&!buffer dest-idx) (&src src-idx) count)
@@ -300,8 +303,8 @@
   (let ((type-context (make-cffi-context element-type :count size)))
     (make-ring-buffer-internal type-context size :num-periods num-periods)))
 
-(defun make-ring-buffer(size &key (element-type 'integer) (num-periods 2))
-  (let ((type-context (make-array-context element-type :count size)))
+(defun make-ring-buffer(size &key (element-type 'integer) (num-periods 2) element-factory)
+  (let ((type-context (make-array-context element-type :count size :element-factory element-factory)))
     (make-ring-buffer-internal type-context size :num-periods num-periods)))
 
 (defparameter *thread-id* 0)
@@ -378,9 +381,10 @@
     (setf (aref buffer idx) (test-data (funcall iter :inc))))
   (funcall ring-buffer :write buffer num-samples))
 
-(defmacro with-ring-buffer((buffer size &key (element-type 'integer) (num-periods 2)) &body body)
-  `(let ((,buffer (make-ring-buffer ,size :element-type ,element-type :num-periods ,num-periods)))
-     ,@body))
+(defmacro with-ring-buffer((buffer size &key (element-type 'integer) (num-periods 2) element-factory) &body body)
+  (with-once-only (num-periods element-factory)
+    `(let ((,buffer (make-ring-buffer ,size :element-type ,element-type :num-periods ,num-periods :element-factory ,element-factory)))
+       ,@body)))
 
 (defun test-buffer(&key (freq 1) (message-length 4096) (buffer-length 1024) (delay-reader-p) (delay-writer-p) (randomnize-p) (read-period-p) (num-periods 4))
   (with-ring-buffer (my-buffer buffer-length :element-type 'test-data :num-periods num-periods)
