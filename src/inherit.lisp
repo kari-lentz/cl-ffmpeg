@@ -27,7 +27,7 @@
 
 (defstruct* 
     (video-params 
-     (:constructor video-params (&key (media-type :avmedia-type-video) width height ring-buffer (output-buffer-size (* width height 120))))
+     (:constructor video-params (&key (media-type :avmedia-type-video) width height ring-buffer (output-buffer-size 120) (num-periods 5)))
      (:include ffmpeg-env))
     (width 1024) (height 768))
 
