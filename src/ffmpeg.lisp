@@ -400,9 +400,10 @@
   `(with-foreign-ring-buffer (,buffer ,ring-buffer-size :num-periods ,num-periods :element-type '(:struct audio-frame))
      ,@body))
 
-(defun run-audio-buffer(closure &key (ring-buffer-size 65536) (num-periods 2))
-  (with-foreign-ring-buffer (buffer ring-buffer-size :num-periods num-periods :element-type '(:struct audio-frame))
-    (funcall closure buffer)))
+(defun run-audio-buffer(ffmpeg-env closure)
+  (with-slots (ring-buffer (ring-buffer-size output-buffer-size) num-periods) ffmpeg-env
+    (with-foreign-ring-buffer (buffer ring-buffer-size :num-periods num-periods :element-type '(:struct audio-frame))
+      (funcall closure buffer))))
 
 (defmacro with-sdl-window((&key (width 320) (height 240) (event-type :wait)) &body event-body)
   (with-gensyms (window-block)
@@ -426,6 +427,7 @@
   (with-slots (ring-buffer output-buffer-size num-periods) ffmpeg-env
     (with-ffmpeg ()
       (run-audio-buffer 
+       ffmpeg-env
        (lambda(buffer)
 	 (setf ring-buffer buffer)
 	 (with-thread ("FFMPEG-WRITER"
@@ -446,9 +448,7 @@
 			     (windup()
 			       (format t "USER TERMINATION~%"))))))
 	   (sdl-blocker)
-	   (funcall buffer :set-eof)))
-       :ring-buffer-size output-buffer-size 
-       :num-periods num-periods))))
+	   (funcall buffer :set-eof)))))))
 
 (defun ffmpeg-transcode(ffmpeg-env in-file-path output-file-path)
   (with-ffmpeg ()
