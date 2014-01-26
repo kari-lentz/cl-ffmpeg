@@ -6,7 +6,7 @@
 (defpackage :ring-buffer
   (:documentation "front end for cl-ffmpeg")
   (:use :cl :cffi :bordeaux-threads :my-env :my-db :utility :cffi-helper)
-  (:export :with-foreign-ring-buffer :user-eof :run))
+  (:export :with-foreign-ring-buffer :with-ring-buffer :user-eof :run))
 
 (defpackage :cl-ffmpeg-inherit
   (:documentation "front end for cl-ffmpeg")
