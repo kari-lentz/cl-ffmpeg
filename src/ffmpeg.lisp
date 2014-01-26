@@ -400,6 +400,10 @@
   `(with-foreign-ring-buffer (,buffer ,ring-buffer-size :num-periods ,num-periods :element-type '(:struct audio-frame))
      ,@body))
 
+(defun run-audio-buffer(closure &key (ring-buffer-size 65536) (num-periods 2))
+  (with-foreign-ring-buffer (buffer ring-buffer-size :num-periods num-periods :element-type '(:struct audio-frame))
+    (funcall closure buffer)))
+
 (defmacro with-sdl-window((&key (width 320) (height 240) (event-type :wait)) &body event-body)
   (with-gensyms (window-block)
     `(block ,window-block
@@ -421,27 +425,30 @@
 (defun run-ffmpeg(ffmpeg-env in-device out-device)
   (with-slots (ring-buffer output-buffer-size num-periods) ffmpeg-env
     (with-ffmpeg ()
-      (with-audio-buffer (buffer :ring-buffer-size output-buffer-size :num-periods num-periods)
-	(setf ring-buffer buffer)
-	(with-thread ("FFMPEG-WRITER"
-		      ()
-		      (with-thread ("FFMPEG-READER" 
-				    ()
-				    (block writer
-				      (handler-bind
-					  ((condition (lambda(c) (funcall buffer :set-error c) (return-from writer))))
-					(run-ffmpeg-out ffmpeg-env out-device))))
-			(handler-bind 
-			    ((user-eof (lambda(c) (declare (ignore c)) (invoke-restart 'windup))))
-			  (restart-case
-			      (unwind-protect
-				   (run-ffmpeg-in ffmpeg-env in-device)
-				(funcall buffer :set-eof)
-				(sdl:push-quit-event))
-			    (windup()
-			      (format t "USER TERMINATION~%"))))))
-	  (sdl-blocker)
-	  (funcall buffer :set-eof))))))
+      (run-audio-buffer 
+       (lambda(buffer)
+	 (setf ring-buffer buffer)
+	 (with-thread ("FFMPEG-WRITER"
+		       ()
+		       (with-thread ("FFMPEG-READER" 
+				     ()
+				     (block writer
+				       (handler-bind
+					   ((condition (lambda(c) (funcall buffer :set-error c) (return-from writer))))
+					 (run-ffmpeg-out ffmpeg-env out-device))))
+			 (handler-bind 
+			     ((user-eof (lambda(c) (declare (ignore c)) (invoke-restart 'windup))))
+			   (restart-case
+			       (unwind-protect
+				    (run-ffmpeg-in ffmpeg-env in-device)
+				 (funcall buffer :set-eof)
+				 (sdl:push-quit-event))
+			     (windup()
+			       (format t "USER TERMINATION~%"))))))
+	   (sdl-blocker)
+	   (funcall buffer :set-eof)))
+       :ring-buffer-size output-buffer-size 
+       :num-periods num-periods))))
 
 (defun ffmpeg-transcode(ffmpeg-env in-file-path output-file-path)
   (with-ffmpeg ()
