@@ -405,6 +405,13 @@
     (with-foreign-ring-buffer (buffer ring-buffer-size :num-periods num-periods :element-type '(:struct audio-frame))
       (funcall closure buffer))))
 
+(defun run-video-buffer(ffmpeg-env closure)
+  (with-slots (ring-buffer (ring-buffer-size output-buffer-size) num-periods width height) ffmpeg-env
+    (with-ring-buffer (buffer ring-buffer-size :num-periods num-periods :element-type 'video-frame :element-factory (lambda()(video-frame width height)))
+      (funcall closure buffer))))
+
+(defparameter *run-buffer-functions* (hash-table-from-list `((:avmedia-type-audio ,#'run-audio-buffer)(:avmedia-type-video ,#'run-video-buffer)) 'eq))
+
 (defmacro with-sdl-window((&key (width 320) (height 240) (event-type :wait)) &body event-body)
   (with-gensyms (window-block)
     `(block ,window-block
@@ -424,9 +431,10 @@
 		       (sdl:push-quit-event)))))
 
 (defun run-ffmpeg(ffmpeg-env in-device out-device)
-  (with-slots (ring-buffer output-buffer-size num-periods) ffmpeg-env
+  (with-slots (ring-buffer output-buffer-size num-periods media-type) ffmpeg-env
     (with-ffmpeg ()
-      (run-audio-buffer 
+      (funcall 
+       ([] *run-buffer-functions* media-type) 
        ffmpeg-env
        (lambda(buffer)
 	 (setf ring-buffer buffer)
