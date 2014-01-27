@@ -27,6 +27,12 @@
 
 (use-foreign-library libswscale)
 
+(define-foreign-library libavutil
+  (:unix (:or "/usr/local/lib/libavutil.so"))
+  (t (:default "libavutil")))
+
+(use-foreign-library libavutil)
+
 (define-foreign-library ffmpeg-wrapper
   (:unix (:or "/usr/local/lib/ffmpeg-wrapper.so"))
   (t (:default "ffmpeg-wrapper")))
@@ -531,10 +537,18 @@
   (nb-streams  :unsigned-int)
   (streams  :pointer))
 
+(defcstruct AVFrac
+  (val :int64)
+  (num :int64)
+  (den :int64))
+
 (defcstruct* (AVStream-Overlay)
   (index :int)
   (id :int)
-  (codec :pointer))
+  (codec :pointer)
+  (priv-data :pointer)
+  (pts (:struct AVFrac))
+  (time-base (:struct AVRational)))
 
 (defcstruct audio-frame
   (samples :ushort :count 2))
@@ -561,3 +575,5 @@
 	 (with-cffi-readers (,data ,linesize) av-picture ,av-picture 
 	   ,@body)))))
 	 
+(defcfun av-frame-get-best-effort-timestamp :int64
+  (frame :pointer))
