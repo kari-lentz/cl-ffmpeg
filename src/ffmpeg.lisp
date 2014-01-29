@@ -90,14 +90,14 @@
 	 (if (= stream-idx (AVPacket-stream-index packet))
 	     (funcall packet-user packet))))))
 
-(defmacro with-decoded-frame((codec-context stream-type frame packet) &body body)
-  (with-gensyms (p-got-frame-ptr ret packet-size)
-    `(with-foreign-object (,p-got-frame-ptr :int) 
-       (let ((,packet-size (AVPacket-size ,packet)))
-	 (let ((,ret (foreign-funcall-pointer ([] *decoders* ,stream-type) () :pointer ,codec-context :pointer ,frame :pointer ,p-got-frame-ptr :pointer ,packet :int)))
-	   (unless (= ,ret ,packet-size) (error 'ffmpeg-fault :msg (% "decode fault -> decoded bytes:~a expected bytes~a" ,ret ,packet-size)))
-	   (unless (= (mem-ref ,p-got-frame-ptr :int) 0)
-	     ,@body))))))
+(defun run-decoded-frame(decode-context frame packet decoded-frame-user)
+  (with-struct-readers (codec-context media-type) decode-context decode-context
+    (with-foreign-object (p-got-frame-ptr :int) 
+      (let ((packet-size (AVPacket-size packet)))
+	(let ((ret (foreign-funcall-pointer ([] *decoders* media-type) () :pointer codec-context :pointer frame :pointer p-got-frame-ptr :pointer packet :int)))
+	  (unless (= ret packet-size) (error 'ffmpeg-fault :msg (% "decode fault -> decoded bytes:~a expected bytes~a" ret packet-size)))
+	  (unless (= (mem-ref p-got-frame-ptr :int) 0)
+	    (funcall decoded-frame-user frame)))))))
 
 (defmacro with-open-input((p-format-context file-path ) &body body)
   (with-gensyms (pp-format-context)
@@ -131,9 +131,11 @@
 	(run-read-frame-loop 
 	 decode-context
 	 (lambda(packet)
-	   (with-struct-readers (codec-context media-type) decode-context decode-context
-	     (with-decoded-frame (codec-context media-type frame packet)
-	       (funcall frame-user frame)))))))))
+	   (run-decoded-frame 
+	    decode-context 
+	    frame 
+	    packet
+	    (lambda (frame) (funcall frame-user frame)))))))))
     
 (defmacro with-open-codec((codec-context codec) &body body)
   `(progn
