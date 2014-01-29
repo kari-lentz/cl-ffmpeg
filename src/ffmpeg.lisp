@@ -79,7 +79,12 @@
 	    ,@body)
        (av-free-packet ,av-packet))))
 
-(defstruct (decode-context (:constructor decode-context (format-context stream-idx codec codec-context media-type))) format-context stream-idx codec codec-context media-type)
+(defstruct (decode-context (:constructor decode-context (format-context stream-idx codec codec-context media-type time-base))) format-context stream-idx codec codec-context media-type time-base)
+
+(defun get-best-pts(decode-context frame)
+  (destructuring-bind (!den den !num num)(decode-context-time-base decode-context)
+    (declare (ignore !den !num))
+    (floor (* (/ (* num (av-frame-get-best-effort-timestamp frame)) den) 1000))))
 
 (defun run-read-frame-loop(decode-context packet-user)
   (with-struct-readers (format-context stream-idx) decode-context decode-context
@@ -112,15 +117,26 @@
 		      ,@body)
 		 (avformat-close-input ,pp-format-context))))))))
 
+(defun get-codec-context(format-context stream-idx)
+  (let ((nb-streams (AVFormat-Context-Overlay-nb-streams format-context)))
+    (cond ((>= stream-idx nb-streams)
+	   (error 'ffmpeg-fault :msg (% "stream index:~a too high" stream-idx)))
+	  ((< stream-idx 0)
+	   (error 'ffmpeg-fault :msg (% "stream index below zero"))))
+    (let ((streams (AVFormat-Context-Overlay-streams format-context)))
+      (let ((stream (mem-aref streams :pointer stream-idx)))
+	(values (AVStream-Overlay-codec stream)(AVStream-Overlay-time-base stream))))))
+
 (defun run-input-stream(file-path media-type decode-context-user)
   (with-open-input (p-format-context file-path)
     (avformat-find-stream-info p-format-context (null-pointer))
     (with-foreign-object (pp-codec :pointer)
       (setf (mem-ref pp-codec :pointer) (null-pointer))
       (let ((stream-idx (av-find-best-stream p-format-context (foreign-enum-value 'avmedia-type media-type) -1 -1 pp-codec 0)))
-	(let ((p-codec-context (get-codec-context p-format-context stream-idx))(p-codec (mem-ref pp-codec :pointer)))
-	  (open-codec-2 p-codec-context p-codec)
-	  (funcall decode-context-user (decode-context p-format-context stream-idx p-codec p-codec-context media-type)))))))
+	(multiple-value-bind (p-codec-context time-base) (get-codec-context p-format-context stream-idx)
+	  (let ((p-codec (mem-ref pp-codec :pointer)))
+	    (open-codec-2 p-codec-context p-codec)
+	    (funcall decode-context-user (decode-context p-format-context stream-idx p-codec p-codec-context media-type time-base))))))))
 
 (defun run-decoded-frame-read-loop(file-path stream-type frame-user)
   (with-av-frame frame
@@ -135,7 +151,7 @@
 	    decode-context 
 	    frame 
 	    packet
-	    (lambda (frame) (funcall frame-user frame)))))))))
+	    (lambda (frame) (funcall frame-user decode-context frame)))))))))
     
 (defmacro with-open-codec((codec-context codec) &body body)
   `(progn
@@ -148,16 +164,6 @@
 (defun open-codec-2(codec-context codec)
   (avcodec-open2 codec-context codec (null-pointer)))
        		 
-(defun get-codec-context(format-context stream-idx)
-  (let ((nb-streams (AVFormat-Context-Overlay-nb-streams format-context)))
-    (cond ((>= stream-idx nb-streams)
-	   (error 'ffmpeg-fault :msg (% "stream index:~a too high" stream-idx)))
-	  ((< stream-idx 0)
-	   (error 'ffmpeg-fault :msg (% "stream index below zero"))))
-    (let ((streams (AVFormat-Context-Overlay-streams format-context)))
-      (let ((stream (mem-aref streams :pointer stream-idx)))
-	(AVStream-Overlay-codec stream)))))
-
 (defun set-audio-params(codec-context num-channels sample-rate bit-rate)
   ;(setf (codec-context-channel-layout codec-context) (av-get-default-channel-layout num-channels))
   (setf (codec-context-channels codec-context) num-channels)
@@ -371,8 +377,10 @@
 	(run-decoded-frame-read-loop 
 	 (namestring in-device) 
 	 stream-type
-	 (lambda(frame-in)
+	 (lambda(decode-context frame-in)
+	   (declare (ignore decode-context))
 	   (incf frames)
+	   ;(format t "PTS:~a~%" (get-best-pts decode-context frame-in))
 	   (with-resampled-frame (frame-out swr-ctx-mgr frame-in sample-rate num-channels)
 	     (write-to-buffer buffer frame-out))))))))
 
@@ -383,7 +391,8 @@
 	(run-decoded-frame-read-loop 
 	 (namestring in-device) 
 	 stream-type
-	 (lambda(frame-in)
+	 (lambda(decode-context frame-in)
+	   (declare (ignore decode-context))
 	   (flet ((frame-writer(video-frames count)
 		    (for-each-range (idx count)
 		      (let ((video-frame (aref video-frames idx)))
