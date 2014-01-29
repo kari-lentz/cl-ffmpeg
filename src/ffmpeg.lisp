@@ -6,6 +6,16 @@
 		`(,slot-outer (,(.sym type '- slot-inner) ,instance)))
        ,@body)))
 
+(defmacro !with-struct-readers((&rest slots) instance type &body body)
+  (with-once-only(instance)
+    `(macrolet 
+	 ,(loop for (slot-outer slot-inner) in (ensure-pairs slots) 
+	     collecting
+	       `(,slot-outer
+		 ()
+		 `(,(.sym ',type '- ',slot-inner) ,',instance)))
+       ,@body)))
+         
 (defstruct (video-frame (:constructor video-frame (width height &key (mmtime (media-time)) played-p skipped-p (frame-data (foreign-alloc :unsigned-char :count (* 2 width height)))))) mmtime played-p skipped-p width height frame-data)
 
 (defun destroy-video-frame(frame)
@@ -69,14 +79,16 @@
 	    ,@body)
        (av-free-packet ,av-packet))))
 
-(defmacro in-frame-read-loop(format-context stream-idx packet &body body)
-  `(loop
-      (with-av-packet ,packet
-	(unless (= (av-read-frame ,format-context ,packet) 0) 
-	  (return))
-	(if (= ,stream-idx (AVPacket-stream-index ,packet))
-	    (progn
-	      ,@body)))))
+(defstruct (decode-context (:constructor decode-context (format-context stream-idx codec codec-context media-type))) format-context stream-idx codec codec-context media-type)
+
+(defun run-read-frame-loop(decode-context packet-user)
+  (with-struct-readers (format-context stream-idx) decode-context decode-context
+    (loop
+       (with-av-packet packet
+	 (unless (= (av-read-frame format-context packet) 0) 
+	   (return))
+	 (if (= stream-idx (AVPacket-stream-index packet))
+	     (funcall packet-user packet))))))
 
 (defmacro with-decoded-frame((codec-context stream-type frame packet) &body body)
   (with-gensyms (p-got-frame-ptr ret packet-size)
@@ -85,14 +97,6 @@
 	 (let ((,ret (foreign-funcall-pointer ([] *decoders* ,stream-type) () :pointer ,codec-context :pointer ,frame :pointer ,p-got-frame-ptr :pointer ,packet :int)))
 	   (unless (= ,ret ,packet-size) (error 'ffmpeg-fault :msg (% "decode fault -> decoded bytes:~a expected bytes~a" ,ret ,packet-size)))
 	   (unless (= (mem-ref ,p-got-frame-ptr :int) 0)
-	     ,@body))))))
-
-(defmacro in-decoded-frame-read-loop((frame file-path &optional (stream-type :avmedia-type-audio)) &body body)
-  (with-gensyms (p-format-context-in p-codec-context-in stream-idx packet-in)
-    `(with-av-frame ,frame
-       (with-input-stream (,p-format-context-in ,p-codec-context-in ,stream-idx ,file-path ,stream-type)
-	 (in-frame-read-loop ,p-format-context-in ,stream-idx ,packet-in
-	   (with-decoded-frame (,p-codec-context-in ,stream-type ,frame ,packet-in)
 	     ,@body))))))
 
 (defmacro with-open-input((p-format-context file-path ) &body body)
@@ -108,6 +112,29 @@
 		      ,@body)
 		 (avformat-close-input ,pp-format-context))))))))
 
+(defun run-input-stream(file-path media-type decode-context-user)
+  (with-open-input (p-format-context file-path)
+    (avformat-find-stream-info p-format-context (null-pointer))
+    (with-foreign-object (pp-codec :pointer)
+      (setf (mem-ref pp-codec :pointer) (null-pointer))
+      (let ((stream-idx (av-find-best-stream p-format-context (foreign-enum-value 'avmedia-type media-type) -1 -1 pp-codec 0)))
+	(let ((p-codec-context (get-codec-context p-format-context stream-idx))(p-codec (mem-ref pp-codec :pointer)))
+	  (open-codec-2 p-codec-context p-codec)
+	  (funcall decode-context-user (decode-context p-format-context stream-idx p-codec p-codec-context media-type)))))))
+
+(defun run-decoded-frame-read-loop(file-path stream-type frame-user)
+  (with-av-frame frame
+    (run-input-stream 
+      file-path 
+      stream-type 
+      (lambda(decode-context)		 
+	(run-read-frame-loop 
+	 decode-context
+	 (lambda(packet)
+	   (with-struct-readers (codec-context media-type) decode-context decode-context
+	     (with-decoded-frame (codec-context media-type frame packet)
+	       (funcall frame-user frame)))))))))
+    
 (defmacro with-open-codec((codec-context codec) &body body)
   `(progn
      (avcodec-open2 ,codec-context ,codec (null-pointer))
@@ -119,17 +146,6 @@
 (defun open-codec-2(codec-context codec)
   (avcodec-open2 codec-context codec (null-pointer)))
        		 
-(defmacro with-input-stream((p-format-context p-codec-context stream-idx file-path media-type) &body body)
-  (with-gensyms (pp-codec p-codec)
-    `(with-open-input (,p-format-context ,file-path)
-       (avformat-find-stream-info ,p-format-context (null-pointer))
-       (with-foreign-object (,pp-codec :pointer)
-	 (setf (mem-ref ,pp-codec :pointer) (null-pointer))
-	 (let ((,stream-idx (av-find-best-stream ,p-format-context (foreign-enum-value 'avmedia-type ,media-type) -1 -1 ,pp-codec 0)))
-	   (let ((,p-codec-context (get-codec-context ,p-format-context ,stream-idx))(,p-codec (mem-ref ,pp-codec :pointer)))
-	     (open-codec-2 ,p-codec-context ,p-codec)
-	     ,@body))))))
-
 (defun get-codec-context(format-context stream-idx)
   (let ((nb-streams (AVFormat-Context-Overlay-nb-streams format-context)))
     (cond ((>= stream-idx nb-streams)
@@ -350,22 +366,28 @@
   (with-slots (sample-rate num-channels (stream-type media-type) (buffer ring-buffer)) audio-params
     (with-swr-context-mgr swr-ctx-mgr
       (let ((frames 0))
-	(in-decoded-frame-read-loop (frame-in (namestring in-device) stream-type)
-	  (incf frames)
-	  (with-resampled-frame (frame-out swr-ctx-mgr frame-in sample-rate num-channels)
-	    (write-to-buffer buffer frame-out)))))))
+	(run-decoded-frame-read-loop 
+	 (namestring in-device) 
+	 stream-type
+	 (lambda(frame-in)
+	   (incf frames)
+	   (with-resampled-frame (frame-out swr-ctx-mgr frame-in sample-rate num-channels)
+	     (write-to-buffer buffer frame-out))))))))
 
 (defmethod run-ffmpeg-in((video-params video-params) (in-device pathname))
   (with-slots ((stream-type media-type) (buffer ring-buffer)) video-params
     (let ((sws-ctx (null-pointer)))
       (let ((frames 0))
-	(in-decoded-frame-read-loop (frame-in (namestring in-device) stream-type)
-	  (flet ((frame-writer(video-frames count)
-		   (for-each-range (idx count)
-		     (let ((video-frame (aref video-frames idx)))
-		       (scale-frame video-frame sws-ctx frame-in)
-		       (incf frames)))))
-	    (funcall :write-period buffer #'frame-writer)))))))
+	(run-decoded-frame-read-loop 
+	 (namestring in-device) 
+	 stream-type
+	 (lambda(frame-in)
+	   (flet ((frame-writer(video-frames count)
+		    (for-each-range (idx count)
+		      (let ((video-frame (aref video-frames idx)))
+			(scale-frame video-frame sws-ctx frame-in)
+			(incf frames)))))
+	     (funcall :write-period buffer #'frame-writer))))))))
 
 (defun buffered-reader(p-format-context-out p-codec-context-out num-channels sample-rate stream-type encoded-packets)
   (lambda(buffer num-samples)
