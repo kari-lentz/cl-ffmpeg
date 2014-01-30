@@ -6,7 +6,7 @@
 		`(,slot-outer (,(.sym type '- slot-inner) ,instance)))
        ,@body)))
 
-(defmacro !with-struct-readers((&rest slots) instance type &body body)
+(defmacro with-struct((&rest slots) instance type &body body)
   (with-once-only(instance)
     `(macrolet 
 	 ,(loop for (slot-outer slot-inner) in (ensure-pairs slots) 
@@ -79,7 +79,7 @@
 	    ,@body)
        (av-free-packet ,av-packet))))
 
-(defstruct (decode-context (:constructor decode-context (format-context stream-idx codec codec-context media-type time-base))) format-context stream-idx codec codec-context media-type time-base)
+(defstruct (decode-context (:constructor decode-context (format-context stream-idx codec codec-context media-type mmtime-start time-base))) format-context stream-idx codec codec-context media-type mmtime-start time-base)
 
 (defun get-best-pts(decode-context frame)
   (destructuring-bind (!den den !num num)(decode-context-time-base decode-context)
@@ -127,6 +127,8 @@
       (let ((stream (mem-aref streams :pointer stream-idx)))
 	(values (AVStream-Overlay-codec stream)(AVStream-Overlay-time-base stream))))))
 
+(defconstant +LEAD-TIME-MS+ 1000)
+
 (defun run-input-stream(file-path media-type decode-context-user)
   (with-open-input (p-format-context file-path)
     (avformat-find-stream-info p-format-context (null-pointer))
@@ -136,7 +138,7 @@
 	(multiple-value-bind (p-codec-context time-base) (get-codec-context p-format-context stream-idx)
 	  (let ((p-codec (mem-ref pp-codec :pointer)))
 	    (open-codec-2 p-codec-context p-codec)
-	    (funcall decode-context-user (decode-context p-format-context stream-idx p-codec p-codec-context media-type time-base))))))))
+	    (funcall decode-context-user (decode-context p-format-context stream-idx p-codec p-codec-context media-type (media-time+ (media-time) +LEAD-TIME-MS+) time-base))))))))
 
 (defun run-decoded-frame-read-loop(file-path stream-type frame-user)
   (with-av-frame frame
@@ -380,7 +382,7 @@
 	 (lambda(decode-context frame-in)
 	   (declare (ignore decode-context))
 	   (incf frames)
-	   ;(format t "PTS:~a~%" (get-best-pts decode-context frame-in))
+	   ;(media-time+ (decode-context-mmtime-start decode-context) (get-best-pts decode-context frame-in))
 	   (with-resampled-frame (frame-out swr-ctx-mgr frame-in sample-rate num-channels)
 	     (write-to-buffer buffer frame-out))))))))
 
@@ -392,10 +394,13 @@
 	 (namestring in-device) 
 	 stream-type
 	 (lambda(decode-context frame-in)
-	   (declare (ignore decode-context))
 	   (flet ((frame-writer(video-frames count)
 		    (for-each-range (idx count)
 		      (let ((video-frame (aref video-frames idx)))
+			(with-struct (mmtime played-p skipped-p) video-frame video-frame
+			    (setf (mmtime) (media-time+ (decode-context-mmtime-start decode-context) (get-best-pts decode-context frame-in)))
+			    (setf (played-p) nil)
+			    (setf (skipped-p) nil))			
 			(scale-frame video-frame sws-ctx frame-in)
 			(incf frames)))))
 	     (funcall :write-period buffer #'frame-writer))))))))
