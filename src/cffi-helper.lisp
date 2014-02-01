@@ -59,6 +59,12 @@
 	     `(defmacro ,lisp-name ,lambda-list
 		`(call-assert ,',return-type ,',lisp-name ,',new-lisp-name ,,@lambda-list))))))
 		  			     
+(defctype size-t :int)
+
+(defcfun memcpy :pointer
+  (dest :pointer)
+  (src :pointer)
+  (n size-t))
 	 
 (defcfun memset :pointer
   (ptr :pointer)
@@ -76,3 +82,75 @@
 		      `(,(.sym '& key)(index)
 			 `(mem-aptr ,',key ,',type ,index))))
        ,@body)))
+
+(with-full-eval
+  (defun array-ptr(array idx)
+    (let ((size (- (length array) idx)))
+      (make-array size :displaced-to array :displaced-index-offset idx))))
+
+(defmacro with-array-ptrs(arrays &body body)
+  `(macrolet
+       ,(loop for array in arrays collecting
+	     `(,(.sym '* array) (index)
+		`(aref ,',array ,index)))
+     (macrolet
+	 ,(loop for array in arrays collecting
+	       `(,(.sym '& array) (index)
+		  `(array-ptr ,',array ,index)))	 
+       ,@body)))
+
+(defun make-cffi-context(type &key (count 1))
+  (with-cffi-ptrs ((!buffer type)(src type))
+    (let ((!buffer (foreign-alloc type :count count)))
+      (dlambda
+	(:write(dest-idx src src-idx count)
+	       (memcpy (&!buffer dest-idx) (&src src-idx) (* (foreign-type-size type) count))
+	       count)
+	(:read(dest-idx src src-idx count)
+	      (memcpy (&src src-idx) (&!buffer dest-idx) (* (foreign-type-size type) count))
+	      count)
+	(:&&(offset)
+	       (&!buffer offset))
+	(:&(ptr offset)
+	     (with-cffi-ptrs ((ptr type))
+	       (&ptr offset)))
+	(:free()
+	      (foreign-free !buffer))))))
+
+(defun array-copy(dest-array src-array count)
+  (for-each-range (idx count)
+    (setf (aref dest-array idx) (aref src-array idx))))
+
+(defun make-array-context(type &key (count 1) element-factory)
+  (with-array-ptrs (!buffer src)
+    (let ((!buffer (make-array count :element-type type)))
+      (when element-factory
+	(for-each-range (idx count)
+	  (setf (aref !buffer idx) (funcall element-factory))))
+      (dlambda
+	(:write(dest-idx src src-idx count)
+	       (array-copy (&!buffer dest-idx) (&src src-idx) count)
+	       count)
+	(:read(dest-idx src src-idx count)
+	      (array-copy (&src src-idx) (&!buffer dest-idx) count)
+	      count)
+	(:&(ptr offset)
+	     (with-array-ptrs (ptr)
+	       (&ptr offset)))
+	(:&&(offset)
+	    (&!buffer offset))
+	(:free())))))
+
+(defun test-array()
+  (with-array-ptrs (buffer)
+    (let ((size 10))
+      (let ((buffer (make-array size :element-type 'integer)))
+	(for-each-range (n size)
+	  (setf (aref buffer n) (+ 100 n)))
+	(let ((buffer-2 (&buffer 3)))
+	  (for-each-range (n 3)
+	    (setf (aref buffer-2 n) (+ 200 n)))
+	  (values
+	   buffer
+	   buffer-2))))))
+

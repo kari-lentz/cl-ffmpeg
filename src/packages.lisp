@@ -1,7 +1,7 @@
 (defpackage :cffi-helper
   (:documentation "front end for cl-ffmpeg")
   (:use :cl :cffi :my-env :utility)
-  (:export :define-cffi-return-types :defcstruct* :defcfun* :zero-memory :with-cffi-readers :with-cffi-ptrs))
+  (:export :define-cffi-return-types :defcstruct* :defcfun* :zero-memory :with-cffi-readers :with-cffi-ptrs :make-cffi-context :with-array-ptrs :make-array-context))
 
 (defpackage :ring-buffer
   (:documentation "front end for cl-ffmpeg")
