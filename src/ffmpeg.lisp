@@ -15,7 +15,59 @@
 		 ()
 		 `(,(.sym ',type '- ',slot-inner) ,',instance)))
        ,@body)))
-         
+
+;; type can be 
+;; :cffi so a foreign array is generate or 
+;; :array where a lisp array is generated (usefull for test purposes)
+;;
+(defun make-packetizer(sample-size &key (context-type :cffi) (type :int))
+  (unless (> sample-size 0) (error "sample size must be > 0")) 
+  (let ((!buffer-sample-size 0)
+	(!buffer (if (eq context-type :array)
+		    (make-array-context type :count sample-size) 
+		    (make-cffi-context type :count sample-size))))
+    (flet ((call-packet-user(packet-user &optional force-p)
+	     (decf !buffer-sample-size
+		   (if (or (= !buffer-sample-size sample-size) (and force-p (> !buffer-sample-size 0)))
+		       (let ((ret (funcall packet-user !buffer !buffer-sample-size)))
+			       (unless ret (error "packet-user cannot return nil"))
+			       ret)
+		       0))))
+      (dlambda
+	(:write (packet-user &optional buffer (num-samples 0))
+		(loop with remaining = num-samples while (> remaining 0) do
+		     (let ((ret (funcall !buffer :write !buffer-sample-size buffer (- num-samples remaining) (min (- sample-size !buffer-sample-size) remaining))))		 
+		       (incf !buffer-sample-size ret) 
+		       (call-packet-user packet-user)		
+		       (decf remaining ret)))
+		(unless (and buffer (> num-samples 0)) (call-packet-user packet-user t))
+		num-samples)
+	(:free ()
+	       (funcall !buffer :free))))))
+
+(defmacro with-packetizer((packetizer sample-size &key (context-type :cffi) (type :int)) &body body)
+  `(let ((,packetizer (make-packetizer ,sample-size :context-type ,context-type :type ,type)))
+     (unwind-protect
+	  (progn
+	    ,@body)
+       (funcall ,packetizer :free))))
+  
+(defun test-packetizer(total-samples packet-size burst-size)
+  (let ((my-array (make-array total-samples :element-type 'integer)))
+    (with-packetizer (my-packetizer packet-size :context-type :array :type 'integer)
+      (for-each-range (idx total-samples)
+	(setf (aref my-array idx) idx))
+      (flet ((my-user(src-buffer samples)
+	       (format t "~a~%" (subseq (funcall src-buffer :&& 0) 0 samples))
+	       samples))
+	(loop with remaining = total-samples while (> remaining 0) do
+	     (let ((ret (funcall my-packetizer :write #'my-user (make-array remaining :displaced-to my-array :displaced-index-offset (- total-samples remaining)) (min remaining burst-size))))
+	       (format t "WRITTEN SAMPLES:~a~%" ret)
+	       (decf remaining ret)))
+	(format t "CLEANUP~%")
+	(funcall my-packetizer :write #'my-user)))))
+  
+	        
 (defstruct (video-frame (:constructor video-frame (width height &key (mmtime (media-time)) played-p skipped-p (frame-data (foreign-alloc :unsigned-char :count (* 2 width height)))))) mmtime played-p skipped-p width height frame-data)
 
 (defun destroy-video-frame(frame)
