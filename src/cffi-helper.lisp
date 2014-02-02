@@ -117,6 +117,13 @@
 	(:free()
 	      (foreign-free !buffer))))))
 
+(defmacro with-cffi-context((cffi-context type &key (count 1)) &body body)
+    `(let ((,cffi-context (make-cffi-context ,type &key :count ,count)))
+       (unwind-protect
+	    (progn
+	      ,@body)
+	 (funcall ,cffi-context :free))))
+
 (defun array-copy(dest-array src-array count)
   (for-each-range (idx count)
     (setf (aref dest-array idx) (aref src-array idx))))
@@ -141,6 +148,13 @@
 	    (&!buffer offset))
 	(:free())))))
 
+(defmacro with-array-context((array-context type &key (count 1) element-factory) &body body)
+    `(let ((,array-context (make-array-context ,type &key :count ,count :element-factory ,element-factory)))
+       (unwind-protect
+	    (progn
+	      ,@body)
+	 (funcall ,array-context :free))))
+       
 (defun test-array()
   (with-array-ptrs (buffer)
     (let ((size 10))
