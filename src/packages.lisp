@@ -28,3 +28,7 @@
   (:use :cl :cffi :bordeaux-threads :lispbuilder-sdl :my-env :my-db :utility :ring-buffer :cffi-helper :cl-ffmpeg-inherit :cl-ffmpeg)
   (:export))
 
+(defpackage :my-sdl
+  (:documentation "basic sdl wrapper)")
+  (:use :cl :cffi :bordeaux-threads :my-env :my-db :utility :ring-buffer :cffi-helper :cl-ffmpeg-inherit :cl-ffmpeg)
+  (:export))

@@ -15,4 +15,6 @@
 	     (:file "ffmpeg-cffi" :depends-on ("media-time" "cffi-helper" "packages"))
 	     (:file "inherit" :depends-on ("packages"))
 	     (:file "ffmpeg" :depends-on ("ring-buffer" "inherit" "ffmpeg-cffi"))
-	     (:file "alsa" :depends-on ("ffmpeg" "inherit" "ffmpeg-cffi" "ring-buffer" "cffi-helper" "packages"))))))
+	     (:file "alsa" :depends-on ("ffmpeg" "inherit" "ffmpeg-cffi" "ring-buffer" "cffi-helper" "packages"))
+	     (:file "keysym" :depends-on ("packages"))
+	     (:file "sdl" :depends-on ("ffmpeg" "keysym" "inherit" "ffmpeg-cffi" "ring-buffer" "cffi-helper" "packages"))))))
